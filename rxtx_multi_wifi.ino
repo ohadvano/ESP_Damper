@@ -14,7 +14,7 @@
 #include "config.h"
 #include "reset.h"
 
-#define VERSION "1.1.13"
+#define VERSION "1.1.14"
 
 const char* FW_VERSION_STR = VERSION;
 bool single_shot = true;
@@ -50,7 +50,6 @@ void setup() {
     }
     ESP_ERROR_CHECK(gpio_install_isr_service(0));
     
-    // uint8_t g_channel_offset = device_config.extended_channels ? 4 : 0;
     Serial.print("Device serving channels: ");
     Serial.println(device_config.extended_channels ? "4-7" : "0-3");
 
@@ -67,8 +66,10 @@ void loop() {
         for (uint8_t ch = 0; ch < NUM_CHANNELS; ++ch) {
             if (rx_new_data[ch]) {
                 rx_new_data[ch] = false;
-                ack_irq_start(ch);
-                ack_gpio_init(ch);
+                if (device_config.ack_en) {
+                    ack_irq_start(ch);
+                    ack_gpio_init(ch);
+                }
                 
                 mqtt_data[ch].ch = ch + device_config.extended_channels * 4;
                 mqtt_data[ch].temp = rx_data[ch].temp;
@@ -85,8 +86,10 @@ void loop() {
             send_tx_payload(ch, CHANNEL_GPIOS[ch], tx_requests[ch].temp, tx_requests[ch].state == "on", tx_requests[ch].fan);
 
             reconfig_rmt_rx_channel(ch, CHANNEL_GPIOS[ch]);
-            ack_gpio_init(ch);
-            ack_irq_start(ch);
+            if (device_config.ack_en) {
+                ack_irq_start(ch);
+                ack_gpio_init(ch);
+            }
             
             mqtt_data[ch].ch = ch + device_config.extended_channels * 4;
             mqtt_data[ch].temp = tx_requests[ch].temp;
@@ -98,7 +101,7 @@ void loop() {
 
     // Handle ACK signal and send MQTT message
     for (uint8_t ch = 0; ch < NUM_CHANNELS; ++ch) {
-        if (mqtt_data[ch].pending && ack_active[ch]){
+        if (mqtt_data[ch].pending && (ack_active[ch] || !device_config.ack_en)){
             public_message(mqtt_data[ch].ch, mqtt_data[ch].temp, mqtt_data[ch].state, mqtt_data[ch].fan);
             tx_requests[ch].pending = false;
             ack_active[ch] = false;

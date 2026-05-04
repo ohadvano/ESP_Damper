@@ -206,6 +206,20 @@ static String buildConfigPageHtml() {
     "</div></div>"
   );
 
+ // ACK/NACK enable
+  html += F(
+    "<div class='section'>"
+    "<div class='field' style='display:flex;align-items:center;justify-content:space-between;'>"
+    "<div style='font-size:16px;font-weight:400;'>ACK/NACK verification</div>"
+    "<label class='switch'>"
+    "<input type='checkbox' name='ack_en' value='1' "
+  );
+  html += device_config.ack_en ? "checked" : "";
+  html += F(
+    "><span class='slider'></span></label>"
+    "</div></div>"
+  );
+
   // Debug verbosity
   html += F(
     "<div class='section'>"
@@ -350,6 +364,7 @@ void web_begin(AsyncWebServer& server, PubSubClient& mqttClient) {
     update_str_if_changed("muser",   device_config.mqtt_user, sizeof(device_config.mqtt_user));
    
     device_config.debug_verbose = request->hasParam("debug", true);
+    device_config.ack_en = request->hasParam("ack_en", true);
 
     if (device_config.wifi_ssid[0] == '\0') device_config.wifi_pass[0] = '\0';
     if (device_config.mqtt_user[0] == '\0') device_config.mqtt_pass[0] = '\0';

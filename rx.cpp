@@ -213,7 +213,7 @@ bool parseRMTData() {
                 Serial.printf("Ch %d broken chunk diagnostics: level0=%d level1=%d dur0=%d dur1=%d\n", ch, level0, level1, duration0, duration1);
             }
             
-            if(rx_cb) rx_cb(ch, symbols, len * sizeof(rmt_symbol_word_t), bits); // Backup data for debug
+            if(rx_cb)  rx_cb(ch, symbols, len * sizeof(rmt_symbol_word_t), bits); // Backup data for debug
         }
 
         if (frames.size() == RX_FRAMES) {
