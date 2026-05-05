@@ -3,6 +3,9 @@
 #include "logo.h"
 #include <WiFi.h>
 #include <ArduinoJson.h>
+#include "debug_log.h"
+#include "ac_model.h"
+#include "serial_intercept.h"
 
 // --------- Helpers ---------
 static String htmlEscape(const String& in) {
@@ -63,6 +66,8 @@ static String buildConfigPageHtml() {
                                   ? String("********")
                                   : String("MQTT password (optional)");
 
+  AcModel selectedModel = ac_model_from_string(device_config.ac_model);
+
   String html;
   html.reserve(9500);
 
@@ -85,6 +90,7 @@ static String buildConfigPageHtml() {
     ".button{width:100%;height:48px;border-radius:24px;border:none;font-size:16px;font-weight:600;cursor:pointer;}"
     ".button.primary{background:var(--accent);color:white;margin-top:8px;}"
     ".button.secondary{background:var(--card);color:var(--text);border:1px solid var(--border);margin-bottom:6px;}"
+    ".rawClearBtn{height:26px;border-radius:24px;border:none;font-size:14px;font-weight:400;cursor:pointer;background:var(--accent);color:white;padding:0 22px;min-width:76px;}"
     ".status{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:14px;margin-bottom:16px;}"
     ".chip{display:inline-block;padding:8px 12px;border-radius:999px;border:1px solid var(--border);background:var(--bg);font-weight:600;font-size:13px;margin-right:8px;}"
     ".chip.ok{background:#58a86c;color:#0b0b0c;border-color:#43734f;}"
@@ -107,6 +113,8 @@ static String buildConfigPageHtml() {
     ".clearBtn:hover{background:rgba(142,142,147,.12);}"
     "[data-theme='dark'] .clearBtn:hover{background:rgba(161,161,166,.14);}"
     ".clearBtn:active{transform:scale(0.98);}"
+    ".field select{width:100%;border:none;outline:none;background:transparent;font-size:16px;color:var(--text);}"
+    "[data-theme='dark'] .field select option{background:#161618;color:#f2f2f7;}"
     "</style></head><body><div class='container'>"
   );
 
@@ -121,6 +129,24 @@ static String buildConfigPageHtml() {
   html += F("<div class='field'><label>Device Name</label><input name='devname' value='");
   html += val_dev;
   html += F("' placeholder='ESP-Damper'></div>");
+
+  html += F(
+    "<div class='section'>"
+    "<div class='field'>"
+    "<label>AC Controller Model</label>"
+    "<select name='ac_model' "
+    "style='width:100%;border:none;outline:none;background:transparent;"
+    "font-size:16px;color:var(--text);'>"
+  );
+
+  html += F("<option value='tac910' ");
+  html += selectedModel == AC_MODEL_TAC910 ? "selected" : "";
+  html += F(">Tadiran TAC-910</option>");
+
+  html += F("<option value='vat6' ");
+  html += selectedModel == AC_MODEL_VAT6 ? "selected" : "";
+  html += F(">Twitoplast Opal VAT-6</option>");
+  html += F("</select></div></div>");
 
   html += F("<div class='field'><label>WiFi SSID</label><input name='ssid' value='");
   html += val_ssid;
@@ -234,6 +260,26 @@ static String buildConfigPageHtml() {
     "</div></div>"
   );
 
+  if (device_config.debug_verbose) {
+    html += F(
+      "<div class='section'>"
+      "<div class='field'>"
+
+      "<div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;'>"
+      "<div style='font-size:16px;font-weight:400;'>Debug Log</div>"
+      "<button type='button' class='rawClearBtn' onclick='clearRawLog()'>Clear</button>"
+      "</div>"
+
+      "<pre id='rawlog' "
+      "style='height:260px;overflow:auto;background:#111;color:#58a86c;padding:10px;border-radius:8px;font-size:12px;white-space:pre-wrap;margin:0;'>"
+      "Waiting for debug output..."
+      "</pre>"
+
+      "</div>"
+      "</div>"
+    );
+  }
+
   html += F("<button class='button primary' type='submit'>Save & Reboot</button>");
 
   html += F("</div>"); // section
@@ -311,6 +357,40 @@ static String buildConfigPageHtml() {
     "document.getElementById('infoLine1').textContent='Status unavailable';"
     "}}"
     "refreshStatus();setInterval(refreshStatus,1000);"
+    
+   "let rawLastSeq = 0;"
+    "async function pollRawLog() {"
+    "  const el = document.getElementById('rawlog');"
+    "  if (!el) return;"
+    "  try {"
+    "    const r = await fetch('/rawlog', {cache:'no-store'});"
+    "    const j = await r.json();"
+    "    if (j.enabled === false) return;"
+    "    if (!j.lines) return;"
+    "    let text = '';"
+    "    let maxSeq = rawLastSeq;"
+    "    for (const item of j.lines) {"
+    "      text += item.text + '\\n';"
+    "      if (item.seq > maxSeq) maxSeq = item.seq;"
+    "    }"
+    "    const hasNewData = maxSeq > rawLastSeq;"
+    "    el.textContent = text || 'No debug output yet.';"
+    "    if (hasNewData) {"
+    "      el.scrollTop = el.scrollHeight;"
+    "    }"
+    "    rawLastSeq = maxSeq;"
+    "  } catch (e) {"
+    "    el.textContent = 'Debug log fetch failed: ' + e;"
+    "  }"
+    "}"
+    "async function clearRawLog() {"
+    "  await fetch('/rawlog/clear', { method: 'POST' });"
+    "  rawLastSeq = 0;"
+    "  const el = document.getElementById('rawlog');"
+    "  if (el) el.textContent = 'No debug output yet.';"
+    "}"
+    "setInterval(pollRawLog, 1000);"
+    "pollRawLog();"
     "</script>"
   );
 
@@ -368,6 +448,18 @@ void web_begin(AsyncWebServer& server, PubSubClient& mqttClient) {
 
     if (device_config.wifi_ssid[0] == '\0') device_config.wifi_pass[0] = '\0';
     if (device_config.mqtt_user[0] == '\0') device_config.mqtt_pass[0] = '\0';
+
+    if (request->hasParam("ac_model", true)) {
+      String v = request->getParam("ac_model", true)->value();
+      v.trim();
+      v.toLowerCase();
+
+      if (v == "vat6" || v == "tac910") {
+        strlcpy(device_config.ac_model, v.c_str(), sizeof(device_config.ac_model));
+      } else {
+        strlcpy(device_config.ac_model, "tac910", sizeof(device_config.ac_model));
+      }
+    }
 
     if (request->hasParam("ch_range", true)) {
       String v = request->getParam("ch_range", true)->value();
@@ -488,6 +580,28 @@ void web_begin(AsyncWebServer& server, PubSubClient& mqttClient) {
     String out;
     serializeJson(doc, out);
     request->send(200, "application/json", out);
+  });
+
+  server.on("/rawlog", HTTP_GET, [&](AsyncWebServerRequest *request) {
+    if (!device_config.debug_verbose) {
+      request->send(200, "application/json", "{\"enabled\":false,\"active\":false,\"lines\":[]}");
+      return;
+    }
+
+    raw_rmt_log_mark_ui_active_and_clear_if_needed();
+
+    String out = raw_rmt_log_json();
+
+    if (out.startsWith("{")) {
+      out = "{\"enabled\":true,\"active\":true," + out.substring(1);
+    }
+
+    request->send(200, "application/json", out);
+  });
+
+  server.on("/rawlog/clear", HTTP_POST, [&](AsyncWebServerRequest *request) {
+    raw_rmt_log_clear();
+    request->send(200, "text/plain", "OK");
   });
 
   // Theme: persist on device

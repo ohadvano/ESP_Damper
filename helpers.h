@@ -4,8 +4,9 @@
 #include <vector>
 #include "defaults.h"
 #include "globals.h"
+#include "ac_model.h"
 
 void clear_mqtt_data(mqtt_data_t mqtt_data);
 String binaryToHexGroups(const String &binStr);
 uint32_t binToDec(const String &binStr);
-bool validateAndParseFrames(std::vector<String> &frames, rx_data_t &rx_data);
+bool validateAndParseFrames(std::vector<String> &frames, rx_data_t &rx_data, const char* model);

@@ -13,8 +13,9 @@
 #include "helpers.h"
 #include "config.h"
 #include "reset.h"
+#include "serial_intercept.h"
 
-#define VERSION "1.1.14"
+#define VERSION "1.1.17"
 
 const char* FW_VERSION_STR = VERSION;
 bool single_shot = true;
@@ -62,7 +63,7 @@ void loop() {
     wireless_loop();
 
     // Handle RX -> MQTT transaction 
-    if (parseRMTData()) {
+    if (parseRMTData(device_config.ac_model)) {
         for (uint8_t ch = 0; ch < NUM_CHANNELS; ++ch) {
             if (rx_new_data[ch]) {
                 rx_new_data[ch] = false;
@@ -75,6 +76,7 @@ void loop() {
                 mqtt_data[ch].temp = rx_data[ch].temp;
                 mqtt_data[ch].state = rx_data[ch].state;
                 mqtt_data[ch].fan = rx_data[ch].fan;
+                mqtt_data[ch].mode = rx_data[ch].mode;
                 mqtt_data[ch].pending = true;
             }
         }
@@ -83,7 +85,7 @@ void loop() {
     // Handle MQTT -> TX transaction
     for (uint8_t ch = 0; ch < NUM_CHANNELS; ++ch) {
         if (tx_requests[ch].pending && !mqtt_data[ch].pending) {         
-            send_tx_payload(ch, CHANNEL_GPIOS[ch], tx_requests[ch].temp, tx_requests[ch].state == "on", tx_requests[ch].fan);
+            send_tx_payload(ch, CHANNEL_GPIOS[ch], tx_requests[ch].temp, tx_requests[ch].state == "on", tx_requests[ch].fan, tx_requests[ch].mode);
 
             reconfig_rmt_rx_channel(ch, CHANNEL_GPIOS[ch]);
             if (device_config.ack_en) {
@@ -95,6 +97,7 @@ void loop() {
             mqtt_data[ch].temp = tx_requests[ch].temp;
             mqtt_data[ch].state = tx_requests[ch].state;
             mqtt_data[ch].fan = tx_requests[ch].fan;
+            mqtt_data[ch].mode = ac_mode_to_string(tx_requests[ch].mode);
             mqtt_data[ch].pending = true;
         }
     }
@@ -102,7 +105,7 @@ void loop() {
     // Handle ACK signal and send MQTT message
     for (uint8_t ch = 0; ch < NUM_CHANNELS; ++ch) {
         if (mqtt_data[ch].pending && (ack_active[ch] || !device_config.ack_en)){
-            public_message(mqtt_data[ch].ch, mqtt_data[ch].temp, mqtt_data[ch].state, mqtt_data[ch].fan);
+            public_message(mqtt_data[ch]);
             tx_requests[ch].pending = false;
             ack_active[ch] = false;
             mqtt_data[ch].pending = false;
@@ -135,21 +138,10 @@ void loop() {
 }
 
 void on_rx_frame(uint8_t ch, const rmt_symbol_word_t* symbols, size_t num_symbols, const String& bits) {
-  if (!device_config.debug_verbose) return;
-  StaticJsonDocument<2048> doc;
-
-  doc["type"] = "raw_data";
-  doc["ch"]   = ch;
-  doc["hex"]  = binaryToHexGroups(bits);
-
-  JsonArray raw = doc.createNestedArray("raw");
-
-  for (size_t i = 0; i < num_symbols; i++) {
-    raw.add(symbols[i].duration0);
-    raw.add(symbols[i].duration1);
-  }
-
-  doc["len"] = num_symbols;
-
-  public_raw_message(doc);
+  // RAW RMT logging is intentionally disabled for now.
+  // Kept as a callback placeholder so it can be re-enabled later.
+  (void)ch;
+  (void)symbols;
+  (void)num_symbols;
+  (void)bits;
 }

@@ -8,6 +8,8 @@
 #include "config.h"
 #include "status_led.h"
 #include <ArduinoJson.h>
+#include "ac_model.h"
+#include "globals.h"
 
 typedef struct {
     bool pending;
@@ -15,6 +17,7 @@ typedef struct {
     uint8_t temp;
     String state;
     uint8_t fan;
+    AcMode mode;
 } tx_request_t;
 
 extern tx_request_t tx_requests[NUM_CHANNELS];
@@ -25,7 +28,7 @@ extern AsyncWebServer server;
 
 void wireless_setup();
 void wireless_loop();
-void public_message(uint8_t ch, uint8_t temp, String state, uint8_t fan);
+void public_message(mqtt_data_t data);
 void public_debug_message(String msg);
 void public_raw_message(StaticJsonDocument<2048> doc);
 void start_ap_mode();

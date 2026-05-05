@@ -5,6 +5,7 @@ typedef struct {
     uint8_t temp;
     String state;
     uint8_t fan;
+    String mode;
 } rx_data_t;
 
 typedef struct {
@@ -12,6 +13,7 @@ typedef struct {
     uint8_t temp;
     String state;
     uint8_t fan;
+    String mode;
     bool pending = false;
 } mqtt_data_t;
 

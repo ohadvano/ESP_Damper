@@ -2,6 +2,8 @@
 #include "tx.h"
 #include "rx.h"
 #include "web.h"
+#include "debug_log.h"
+#include "serial_intercept.h"
 
 #define AP_IP       IPAddress(192, 168, 50, 1)
 #define AP_GATEWAY  IPAddress(192, 168, 50, 1)
@@ -27,6 +29,7 @@ void wireless_setup() {
 
     web_begin(server, client);
     server.begin();
+    web_log_mark_network_ready();
     Serial.println("HTTP server started");
     ElegantOTA.begin(&server);    // Start ElegantOTA
     
@@ -103,6 +106,7 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
   uint8_t temp=0;
   String state="";
   uint8_t fan=0;
+  AcMode mode = AC_MODE_UNKNOWN;
 
   if (jsonDoc.containsKey("ch")) {
     if (device_config.extended_channels)
@@ -126,6 +130,17 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
     }
   }
 
+  if (jsonDoc.containsKey("mode")) {
+    mode = ac_mode_from_string(jsonDoc["mode"].as<String>());
+  }
+
+  AcModel model = ac_model_from_string(device_config.ac_model);
+
+  if (model == AC_MODEL_VAT6 && mode == AC_MODE_UNKNOWN) {
+    public_debug_message("Command rejected: missing HEAT/COOL mode");
+    return;
+  }
+
   if (!tx_requests[ch].pending) {
       // Just store request
       tx_requests[ch].pending = true;
@@ -133,19 +148,21 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
       tx_requests[ch].temp = temp;
       tx_requests[ch].state = state;
       tx_requests[ch].fan = fan;
+      tx_requests[ch].mode = mode;
   }
   else
       public_debug_message("Received duplicate command on ch " + String(ch + device_config.extended_channels * 4));
 }
 
-void public_message(uint8_t ch, uint8_t temp, String state, uint8_t fan) {
+void public_message(mqtt_data_t data) {
   StaticJsonDocument<180> doc;
   char output[180];
   
-  doc["ch"] = ch;
-  doc["temp"] = temp;
-  doc["state"] = state;
-  doc["fan"] = fan;
+  doc["ch"] = data.ch;
+  doc["temp"] = data.temp;
+  doc["state"] = data.state;
+  doc["fan"] = data.fan;
+  doc["mode"] = data.mode;
 
   serializeJson(doc, output);
   Serial.println(output);

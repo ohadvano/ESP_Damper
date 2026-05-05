@@ -1,6 +1,8 @@
 #include "rx.h"
 #include "helpers.h"
 #include "driver/gpio.h"
+#include "debug_log.h"
+#include "serial_intercept.h"
 
 static rx_frame_cb_t rx_cb = nullptr;
 
@@ -98,6 +100,7 @@ bool rmt_rx_done_callback(rmt_channel_handle_t channel, const rmt_rx_done_event_
     if (ch < 0 || ch >= NUM_CHANNELS) return false;
 
     size_t count = edata->num_symbols;
+    raw_rmt_log_add(ch, edata->received_symbols, count, count == 57);
 
     if (micros() - rx_last_call[ch] > FRAME_TIMEOUT_US) clear_rx_buffers(ch);
     if (count > RX_BUFFER_SIZE) count = RX_BUFFER_SIZE;
@@ -157,7 +160,7 @@ void reconfig_rmt_rx_channel(uint8_t ch, gpio_num_t gpio) {
     rmt_rx_channel_config(ch, gpio);
 }
 
-bool parseRMTData() {
+bool parseRMTData(const char* model) {
     bool data_received = false;
 
     // Check each channel for ready data
@@ -213,7 +216,7 @@ bool parseRMTData() {
                 Serial.printf("Ch %d broken chunk diagnostics: level0=%d level1=%d dur0=%d dur1=%d\n", ch, level0, level1, duration0, duration1);
             }
             
-            if(rx_cb)  rx_cb(ch, symbols, len * sizeof(rmt_symbol_word_t), bits); // Backup data for debug
+            if(rx_cb) rx_cb(ch, symbols, len, bits); // Backup data for debug
         }
 
         if (frames.size() == RX_FRAMES) {
@@ -221,7 +224,7 @@ bool parseRMTData() {
             Serial.println("Frame 1: " + frames[0] + " (" + binaryToHexGroups(frames[0]) + ")");
             Serial.println("Frame 2: " + frames[1] + " (" + binaryToHexGroups(frames[1]) + ")");
             Serial.println("Frame 3: " + frames[2] + " (" + binaryToHexGroups(frames[2]) + ")");
-            bool res = validateAndParseFrames(frames, rx_data[ch]);
+            bool res = validateAndParseFrames(frames, rx_data[ch], model);
             if (res) {
               rx_new_data[ch] = true;
               data_received = true;

@@ -27,4 +27,4 @@ bool rmt_rx_done_callback(rmt_channel_handle_t channel, const rmt_rx_done_event_
 void rmt_rx_channel_config(uint8_t ch, gpio_num_t gpio);
 void reconfig_rmt_rx_channel(uint8_t ch, gpio_num_t gpio);
 void clear_rx_buffers(uint8_t ch);
-bool parseRMTData();
+bool parseRMTData(const char* model);

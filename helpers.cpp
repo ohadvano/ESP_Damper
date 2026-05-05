@@ -1,4 +1,5 @@
 #include "helpers.h"
+#include "serial_intercept.h"
 
 // Utility: converts binary string to hex string
 String binaryToHexGroups(const String &binStr) {
@@ -22,7 +23,7 @@ uint32_t binToDec(const String &binStr) {
 }
 
 // Validation and parsing logic
-bool validateAndParseFrames(std::vector<String> &frames, rx_data_t &rx_data) {
+bool validateAndParseFrames(std::vector<String> &frames, rx_data_t &rx_data, const char* model) {
     if (frames.size() != RX_FRAMES) return false;
 
     int match12 = (frames[0] == frames[1] && frames[0] != DUMMY_FRAME);
@@ -46,18 +47,23 @@ bool validateAndParseFrames(std::vector<String> &frames, rx_data_t &rx_data) {
     }
 
     String tempBits = selected.substring(8, 16);
-    uint8_t temperature = binToDec(tempBits) + 5;
     bool state = (selected.charAt(17) == '1');
     uint8_t damperAngle = binToDec(selected.substring(18, 20));
+
+    uint8_t rawTemperature = binToDec(tempBits);
+    AcModel ac_model = ac_model_from_string(model);
+    AcMode mode = ac_rmt_mode_to_mqtt(ac_model, rawTemperature);
+    uint8_t temperature = ac_rmt_temp_to_mqtt(ac_model, mode, rawTemperature);
 
     rx_data.temp = temperature;
     rx_data.state = state ? "on" : "off";
     rx_data.fan = damperAngle;
+    rx_data.mode = ac_mode_to_string(mode);
 
-    Serial.printf("Temperature: %d C\n", temperature);
-    Serial.printf("State: %s\n", state ? "ON" : "OFF");
-    Serial.printf("Damper Angle: %d\n", damperAngle);
+    Serial.printf("Temperature: %d C\n", rx_data.temp);
+    Serial.printf("State: %s\n", rx_data.state.c_str());
+    Serial.printf("Damper Angle: %d\n", rx_data.fan);
+    Serial.printf("Mode: %s\n", rx_data.mode.c_str());
 
     return true;
-
 }

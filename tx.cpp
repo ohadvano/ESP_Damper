@@ -1,4 +1,6 @@
 #include "tx.h"
+#include "config.h"
+#include "serial_intercept.h"
 
 rmt_channel_handle_t tx_channel[NUM_CHANNELS] = { NULL };
 rmt_encoder_handle_t copy_encoder[NUM_CHANNELS] = { NULL };
@@ -108,7 +110,7 @@ void build_frame_symbols(const uint8_t frame[7], rmt_symbol_word_t* out, size_t&
   out_count = idx;
 }
 
-void send_tx_payload(uint8_t ch, gpio_num_t gpio, uint8_t temperature, bool state, uint8_t fan) {
+void send_tx_payload(uint8_t ch, gpio_num_t gpio, uint8_t temperature, bool state, uint8_t fan, AcMode mode) {
     if (ch >= NUM_CHANNELS) return;
 
     rmt_symbol_word_t syms[174];
@@ -116,11 +118,12 @@ void send_tx_payload(uint8_t ch, gpio_num_t gpio, uint8_t temperature, bool stat
 
     if (!tx_channel[ch]) rmt_tx_channel_config(ch, gpio);
 
-    temperature = temperature - 5;
+    AcModel model = ac_model_from_string(device_config.ac_model);
+    uint8_t rmtTemp = ac_mqtt_temp_to_rmt(model, mode, temperature);
     uint8_t status = state ? (state << 6) | (fan << 4) : 0x30;
     
 
-    uint8_t DEMO_PAYLOAD[7] = {0x14, temperature, status, 0xF4, 0xFF, 0xFF, 0x00};
+    uint8_t DEMO_PAYLOAD[7] = {0x14, rmtTemp, status, 0xF4, 0xFF, 0xFF, 0x00};
     build_frame_symbols(DEMO_PAYLOAD, syms, n_syms);
 
     rmt_transmit_config_t tx_cfg = { .loop_count = 0, .flags = { .eot_level = 1 } };

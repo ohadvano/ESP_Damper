@@ -32,15 +32,15 @@ static const gpio_num_t CHANNEL_GPIOS[NUM_CHANNELS] = { GPIO_NUM_7, GPIO_NUM_8, 
 // RX Timing (us)
 // =========================
 #define HEADER_LOW_MIN     100
-#define HEADER_LOW_MAX     650
+#define HEADER_LOW_MAX     700
 #define HEADER_HIGH_MIN   1600
 #define HEADER_HIGH_MAX   2200
 #define FOOTER_LOW_MIN    7700
 #define FOOTER_LOW_MAX    8000
 
 #define BIT_LOW_MIN        250
-#define BIT_LOW_MAX        620
-#define BIT_HIGH_0_MIN     450
+#define BIT_LOW_MAX        700
+#define BIT_HIGH_0_MIN     400
 #define BIT_HIGH_0_MAX     900
 #define BIT_HIGH_1_MIN    1450
 #define BIT_HIGH_1_MAX    2200
