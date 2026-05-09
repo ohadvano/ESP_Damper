@@ -15,7 +15,7 @@
 #include "reset.h"
 #include "serial_intercept.h"
 
-#define VERSION "1.1.17"
+#define VERSION "1.1.18"
 
 const char* FW_VERSION_STR = VERSION;
 bool single_shot = true;
@@ -129,6 +129,14 @@ void loop() {
             ack_width[ch] = 0;
         }
     }
+
+    for (uint8_t ch = 0; ch < NUM_CHANNELS; ++ch) {
+        if (ack_width_dbg[ch] > 0) {
+            if(device_config.debug_verbose)
+                Serial.println("Ch " + String(ch + device_config.extended_channels * 4) + " PULSE width is " + String(ack_width_dbg[ch]));
+            ack_width_dbg[ch] = 0;
+        }
+    }
     
     // Send MQTT message when ESP has booted
     if (single_shot){
@@ -138,10 +146,21 @@ void loop() {
 }
 
 void on_rx_frame(uint8_t ch, const rmt_symbol_word_t* symbols, size_t num_symbols, const String& bits) {
-  // RAW RMT logging is intentionally disabled for now.
-  // Kept as a callback placeholder so it can be re-enabled later.
-  (void)ch;
-  (void)symbols;
-  (void)num_symbols;
-  (void)bits;
+  if (!device_config.debug_verbose) return;
+  StaticJsonDocument<2048> doc;
+
+  doc["type"] = "raw_data";
+  doc["ch"]   = ch;
+  doc["hex"]  = binaryToHexGroups(bits);
+
+  JsonArray raw = doc.createNestedArray("raw");
+
+  for (size_t i = 0; i < num_symbols; i++) {
+    raw.add(symbols[i].duration0);
+    raw.add(symbols[i].duration1);
+  }
+
+  doc["len"] = num_symbols;
+
+  public_raw_message(doc);
 }

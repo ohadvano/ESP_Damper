@@ -23,6 +23,8 @@ size_t ack_timer[NUM_CHANNELS] = {0};
 bool ack_active[NUM_CHANNELS] = {false};
 bool ack_timeout[NUM_CHANNELS] = {false};
 size_t ack_width[NUM_CHANNELS] = {0};
+size_t ack_width_dbg[NUM_CHANNELS] = {0};
+
 
 
 esp_timer_handle_t oneshot_timer[NUM_CHANNELS] = {NULL};
@@ -84,11 +86,14 @@ void IRAM_ATTR ack_gpio_isr(void *arg) {
     if (state) {  // Rising edge → pulse end
         uint32_t width = now - ack_timer[ch];
         ack_width[ch] = width;
-        if (ack_timer[ch] != 0 && width > 500000) { 
+        if (ack_timer[ch] != 0 && width > 500000) { // 500000
             ack_active[ch] = true;
             ack_gpio_remove(ch);
             ack_irq_stop(ch);
         }
+
+        ack_width_dbg[ch] = width;
+
     } 
     else {  // Falling edge → pulse start
         if (ack_timer[ch] == 0) ack_timer[ch] = now;
