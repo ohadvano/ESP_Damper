@@ -16,6 +16,9 @@ AsyncWebServer server(80);
 tx_request_t tx_requests[NUM_CHANNELS] = {};
 static void reconnect();
 static void mqtt_callback(char* topic, byte* payload, unsigned int length);
+static void publish_discovery();
+
+extern const char* FW_VERSION_STR;
 
 void wireless_setup() {
     bool wifi_sta_mode = true;
@@ -36,7 +39,9 @@ void wireless_setup() {
     if(wifi_sta_mode) {
         led_set_blink(100);
         client.setServer(device_config.mqtt_server, device_config.mqtt_port);
-        client.setBufferSize(2048);
+        // 3072 leaves headroom for the largest HA discovery payload (~1.8 KB)
+        // plus topic and MQTT framing overhead.
+        client.setBufferSize(3072);
         client.setCallback(mqtt_callback);
     }
 }
@@ -76,7 +81,8 @@ static void reconnect() {
     if (ok) {
       Serial.println("MQTT connected");
       client.unsubscribe(device_config.mqtt_topic_rx);
-      client.subscribe(device_config.mqtt_topic_rx);  
+      client.subscribe(device_config.mqtt_topic_rx);
+      publish_discovery();
     } else {
       Serial.print(" Failed, rc=");
       Serial.println(client.state());
@@ -229,4 +235,130 @@ void start_sta_mode() {
     Serial.println(" connected");
     Serial.print("IP address: ");
     Serial.println(WiFi.localIP());
+}
+
+static String device_unique_base() {
+  String mac = WiFi.macAddress();
+  mac.replace(":", "");
+  mac.toLowerCase();
+  return String("esp_damper_") + mac;
+}
+
+static void publish_discovery() {
+  const String base = device_unique_base();
+
+  // Disable path: erase entities by publishing empty retained payloads.
+  if (!device_config.enable_discovery) {
+    for (uint8_t ch = 0; ch < NUM_CHANNELS; ++ch) {
+      String t = String("homeassistant/climate/") + base + "_ch" + ch + "/config";
+      client.publish(t.c_str(), (const uint8_t*)"", 0, true);
+    }
+    Serial.println("HA MQTT discovery: cleared");
+    return;
+  }
+
+  for (uint8_t ch = 0; ch < NUM_CHANNELS; ++ch) {
+    const String unique_id   = base + "_ch" + ch;
+    const String object_id   = String("damper_ch") + ch;
+    const String config_topic = String("homeassistant/climate/") + unique_id + "/config";
+
+    DynamicJsonDocument doc(3072);
+
+    doc["name"]      = String("Damper Ch") + ch;
+    doc["unique_id"] = unique_id;
+    doc["object_id"] = object_id;
+
+    JsonObject dev = doc.createNestedObject("device");
+    JsonArray ids  = dev.createNestedArray("identifiers");
+    ids.add(base);
+    dev["name"]         = device_config.device_name;
+    dev["manufacturer"] = "ESP_Damper";
+    dev["model"]        = "TAC-910 / VAT-6 IR bridge";
+    dev["sw_version"]   = FW_VERSION_STR;
+
+    JsonArray modes = doc.createNestedArray("modes");
+    modes.add("off");
+    modes.add("cool");
+    modes.add("heat");
+
+    JsonArray fan_modes = doc.createNestedArray("fan_modes");
+    fan_modes.add("1");
+    fan_modes.add("2");
+    fan_modes.add("3");
+
+    doc["min_temp"]  = 16;
+    doc["max_temp"]  = 30;
+    doc["temp_step"] = 1;
+
+    const char* tx_topic = device_config.mqtt_topic_tx;
+    const char* rx_topic = device_config.mqtt_topic_rx;
+
+    const String ch_filter = String("{% if value_json.ch == ") + ch + " %}";
+
+    // Inbound (device -> HA) state templates.
+    doc["current_temperature_topic"]    = tx_topic;
+    doc["current_temperature_template"] =
+        ch_filter + "{{ value_json.temp }}{% endif %}";
+
+    doc["temperature_state_topic"]      = tx_topic;
+    doc["temperature_state_template"]   =
+        ch_filter + "{{ value_json.temp }}{% endif %}";
+
+    // mode is "unknown" on TAC-910 RX frames; in that case the template
+    // emits nothing and HA preserves the last known mode.
+    doc["mode_state_topic"]    = tx_topic;
+    doc["mode_state_template"] =
+        ch_filter +
+        "{% if value_json.state == 'off' %}off"
+        "{% elif value_json.mode in ['cool','heat'] %}{{ value_json.mode }}"
+        "{% endif %}{% endif %}";
+
+    doc["fan_mode_state_topic"]    = tx_topic;
+    doc["fan_mode_state_template"] =
+        ch_filter + "{{ value_json.fan }}{% endif %}";
+
+    // Outbound (HA -> device) command templates. Each command carries the
+    // full set of fields the firmware expects so a single MQTT message
+    // represents a complete state. `this` is the climate entity itself;
+    // `this.state` is the current HVAC mode, `this.attributes.*` are the
+    // setpoint and fan mode. Defaults via `| int(N)` and `or 'cool'` keep
+    // commands valid when an attribute hasn't been seen yet.
+    doc["temperature_command_topic"]    = rx_topic;
+    doc["temperature_command_template"] =
+        String("{\"ch\":") + ch +
+        ",\"temp\":{{ value | int }}"
+        ",\"state\":\"on\""
+        ",\"mode\":\"{{ this.state if this.state in ['cool','heat'] else 'cool' }}\""
+        ",\"fan\":{{ this.attributes.fan_mode | int(2) }}}";
+
+    doc["mode_command_topic"]    = rx_topic;
+    doc["mode_command_template"] =
+        String("{% if value == 'off' %}") +
+        "{\"ch\":" + ch + ",\"state\":\"off\"}"
+        "{% else %}"
+        "{\"ch\":" + ch +
+        ",\"state\":\"on\""
+        ",\"mode\":\"{{ value }}\""
+        ",\"temp\":{{ this.attributes.temperature | int(24) }}"
+        ",\"fan\":{{ this.attributes.fan_mode | int(2) }}}"
+        "{% endif %}";
+
+    doc["fan_mode_command_topic"]    = rx_topic;
+    doc["fan_mode_command_template"] =
+        String("{\"ch\":") + ch +
+        ",\"state\":\"on\""
+        ",\"fan\":{{ value | int }}"
+        ",\"temp\":{{ this.attributes.temperature | int(24) }}"
+        ",\"mode\":\"{{ this.state if this.state in ['cool','heat'] else 'cool' }}\"}";
+
+    static char buffer[2560];
+    size_t n = serializeJson(doc, buffer, sizeof(buffer));
+
+    if (!client.publish(config_topic.c_str(), (const uint8_t*)buffer, n, true)) {
+      Serial.print("Discovery publish failed for ch ");
+      Serial.println(ch);
+    }
+  }
+
+  Serial.println("HA MQTT discovery: published");
 }

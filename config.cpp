@@ -30,6 +30,8 @@ void config_set_defaults() {
   //   "tac910" = Tadiran TAC-910
   //   "vat6"   = Twitoplast Opal VAT-6
   strcpy(device_config.ac_model, "tac910");
+
+  device_config.enable_discovery = true;
 }
 
 void config_begin() {
@@ -42,6 +44,10 @@ void config_load() {
     config_save();
     return;
   }
+
+  // Pre-populate so fields added after the stored blob was written keep
+  // their defaults (NVS only overwrites as many bytes as it stored).
+  config_set_defaults();
 
   prefs.getBytes("cfg", &device_config, sizeof(device_config));
 

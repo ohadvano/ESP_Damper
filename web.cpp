@@ -228,6 +228,20 @@ static String buildConfigPageHtml() {
     "</div></div>"
   );
 
+  // HA MQTT discovery
+  html += F(
+    "<div class='section'>"
+    "<div class='field' style='display:flex;align-items:center;justify-content:space-between;'>"
+    "<div style='font-size:16px;font-weight:400;'>HA MQTT auto-discovery</div>"
+    "<label class='switch'>"
+    "<input type='checkbox' name='discovery' value='1' "
+  );
+  html += device_config.enable_discovery ? "checked" : "";
+  html += F(
+    "><span class='slider'></span></label>"
+    "</div></div>"
+  );
+
   // Debug verbosity
   html += F(
     "<div class='section'>"
@@ -427,6 +441,7 @@ void web_begin(AsyncWebServer& server, PubSubClient& mqttClient) {
    
     device_config.debug_verbose = request->hasParam("debug", true);
     device_config.ack_en = request->hasParam("ack_en", true);
+    device_config.enable_discovery = request->hasParam("discovery", true);
 
     if (device_config.wifi_ssid[0] == '\0') device_config.wifi_pass[0] = '\0';
     if (device_config.mqtt_user[0] == '\0') device_config.mqtt_pass[0] = '\0';

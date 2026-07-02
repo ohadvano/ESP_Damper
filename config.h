@@ -16,6 +16,7 @@ typedef struct {
     bool debug_verbose;
     bool ack_en;
     char ac_model[16];
+    bool enable_discovery;
 } device_config_t;
 
 extern device_config_t device_config;
