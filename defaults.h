@@ -6,11 +6,16 @@
 // =========================
 // Pin / Frame Configuration
 // =========================
-#define CH1_GPIO           ((gpio_num_t)7)   // ESP32-S2 GPIO7
+#define CH1_GPIO           ((gpio_num_t)13)  // ESP32 GPIO13 (DOIT DEVKIT V1)
 
-#define NUM_CHANNELS        4
+#define NUM_CHANNELS        8
 
-static const gpio_num_t CHANNEL_GPIOS[NUM_CHANNELS] = { GPIO_NUM_7, GPIO_NUM_8, GPIO_NUM_9, GPIO_NUM_10 };
+// DOIT ESP32 DEVKIT V1 pin map. Avoids SPI-flash pins (6-11),
+// boot-strapping pins (0, 2, 5, 12, 15), and input-only pins (34-39).
+static const gpio_num_t CHANNEL_GPIOS[NUM_CHANNELS] = {
+    GPIO_NUM_13, GPIO_NUM_14, GPIO_NUM_17, GPIO_NUM_18,
+    GPIO_NUM_19, GPIO_NUM_21, GPIO_NUM_22, GPIO_NUM_23
+};
 
 #define RX_FRAMES          3
 #define RX_BUFFER_SIZE     64

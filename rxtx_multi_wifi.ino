@@ -1,10 +1,13 @@
-// Latest ElegantOTA requires manual configuration to work in AsyncWebServer mode:
-// Add in ElegantOTA.h:
-//    #define ELEGANTOTA_USE_ASYNC_WEBSERVER 1
+// Latest ElegantOTA requires manual configuration to work in AsyncWebServer mode.
 //
-// To get to update page by direct IP address:
-// Remove "update" in ElegantOTA.cpp:
-//    _server->on("/update", HTTP_GET, [&](AsyncWebServerRequest *request)
+// 1. In ElegantOTA.h, set:
+//        #define ELEGANTOTA_USE_ASYNC_WEBSERVER 1
+//
+// 2. In ElegantOTA.cpp, uncomment the `/update` GUI route inside the
+//    `#if ELEGANTOTA_USE_ASYNC_WEBSERVER == 1` block (remove the `/* ... */`
+//    wrapping `_server->on("/update", HTTP_GET, ...)`). Without this, the
+//    /ota/start and /ota/upload endpoints work but the browser-friendly
+//    upload page at http://<device>/update returns 404.
 
 
 #include "wireless.h"
@@ -51,8 +54,8 @@ void setup() {
     }
     ESP_ERROR_CHECK(gpio_install_isr_service(0));
     
-    Serial.print("Device serving channels: ");
-    Serial.println(device_config.extended_channels ? "4-7" : "0-3");
+    Serial.print("Device serving channels: 0-");
+    Serial.println(NUM_CHANNELS - 1);
 
     rx_set_callback(on_rx_frame); // Debug data callback
 
@@ -72,7 +75,7 @@ void loop() {
                     ack_gpio_init(ch);
                 }
                 
-                mqtt_data[ch].ch = ch + device_config.extended_channels * 4;
+                mqtt_data[ch].ch = ch;
                 mqtt_data[ch].temp = rx_data[ch].temp;
                 mqtt_data[ch].state = rx_data[ch].state;
                 mqtt_data[ch].fan = rx_data[ch].fan;
@@ -93,7 +96,7 @@ void loop() {
                 ack_gpio_init(ch);
             }
             
-            mqtt_data[ch].ch = ch + device_config.extended_channels * 4;
+            mqtt_data[ch].ch = ch;
             mqtt_data[ch].temp = tx_requests[ch].temp;
             mqtt_data[ch].state = tx_requests[ch].state;
             mqtt_data[ch].fan = tx_requests[ch].fan;
@@ -115,7 +118,7 @@ void loop() {
     // Handle NACK signal
     for (uint8_t ch = 0; ch < NUM_CHANNELS; ++ch) {
         if (ack_timeout[ch]) {
-            public_debug_message("Ch " + String(ch + device_config.extended_channels * 4) + " command failed");
+            public_debug_message("Ch " + String(ch) + " command failed");
             mqtt_data[ch].pending = false;
             tx_requests[ch].pending = false;
             ack_timeout[ch] = false;
@@ -125,7 +128,7 @@ void loop() {
     for (uint8_t ch = 0; ch < NUM_CHANNELS; ++ch) {
         if (ack_width[ch] > 0) {
             if(device_config.debug_verbose)
-                public_debug_message("Ch " + String(ch + device_config.extended_channels * 4) + " ACK width is " + String(ack_width[ch]));
+                public_debug_message("Ch " + String(ch) + " ACK width is " + String(ack_width[ch]));
             ack_width[ch] = 0;
         }
     }
@@ -133,7 +136,7 @@ void loop() {
     for (uint8_t ch = 0; ch < NUM_CHANNELS; ++ch) {
         if (ack_width_dbg[ch] > 0) {
             if(device_config.debug_verbose)
-                Serial.println("Ch " + String(ch + device_config.extended_channels * 4) + " PULSE width is " + String(ack_width_dbg[ch]));
+                Serial.println("Ch " + String(ch) + " PULSE width is " + String(ack_width_dbg[ch]));
             ack_width_dbg[ch] = 0;
         }
     }

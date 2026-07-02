@@ -109,11 +109,8 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
   AcMode mode = AC_MODE_UNKNOWN;
 
   if (jsonDoc.containsKey("ch")) {
-    if (device_config.extended_channels)
-      ch = jsonDoc["ch"].as<uint8_t>() - device_config.extended_channels * 4;
-    else
-      ch = jsonDoc["ch"].as<uint8_t>();
-    if (ch >= 4) return;
+    ch = jsonDoc["ch"].as<uint8_t>();
+    if (ch >= NUM_CHANNELS) return;
   }
 
   if (jsonDoc.containsKey("temp")) {
@@ -151,7 +148,7 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
       tx_requests[ch].mode = mode;
   }
   else
-      public_debug_message("Received duplicate command on ch " + String(ch + device_config.extended_channels * 4));
+      public_debug_message("Received duplicate command on ch " + String(ch));
 }
 
 void public_message(mqtt_data_t data) {

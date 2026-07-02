@@ -1,7 +1,7 @@
 #pragma once
 #include <Arduino.h>
 
-#define PWR_LED 16
+#define PWR_LED 2   // DOIT DEVKIT V1 onboard blue LED (active HIGH)
 
 enum LedMode : uint8_t {
   LED_OFF = 0,

@@ -4,7 +4,8 @@ static volatile LedMode g_mode = LED_OFF;
 static volatile uint16_t g_interval_ms = 500;
 
 static inline void write_led(bool on) {
-  digitalWrite(PWR_LED, (on ? LOW : HIGH));
+  // DOIT DEVKIT V1 onboard LED is active HIGH (anode to GPIO via series resistor, cathode to GND).
+  digitalWrite(PWR_LED, (on ? HIGH : LOW));
 }
 
 static void ledTask(void *param) {

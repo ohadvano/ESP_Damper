@@ -205,24 +205,6 @@ static String buildConfigPageHtml() {
     "</div>"
   );
 
-  html += F(
-    "<div class='section'>"
-    "<div class='field'>"
-    "<label>Channel Range</label>"
-    "<div style='display:flex;gap:12px;'>"
-
-    "<label style='display:flex;align-items:center;gap:6px;color:var(--text);'>"
-    "<input type='radio' name='ch_range' value='low' ");
-  html += device_config.extended_channels ? "" : "checked";
-  html += F(
-    "> Channels 0-3</label>"
-    "<label style='display:flex;align-items:center;gap:6px;color:var(--text);'>"
-    "<input type='radio' name='ch_range' value='high' ");
-  html += device_config.extended_channels ? "checked" : "";
-  html += F("> Channels 4-7</label>"
-    "</div></div></div>"
-  );
-
   // Appearance toggle
   html += F(
     "<div class='section'>"
@@ -458,22 +440,6 @@ void web_begin(AsyncWebServer& server, PubSubClient& mqttClient) {
         strlcpy(device_config.ac_model, v.c_str(), sizeof(device_config.ac_model));
       } else {
         strlcpy(device_config.ac_model, "tac910", sizeof(device_config.ac_model));
-      }
-    }
-
-    if (request->hasParam("ch_range", true)) {
-      String v = request->getParam("ch_range", true)->value();
-      bool newFlag = (v == "high");
-      if (newFlag != device_config.extended_channels) {
-        device_config.extended_channels = newFlag;
-      }
-    }
-
-    if (request->hasParam("ch_range", true)) {
-      String v = request->getParam("ch_range", true)->value();
-      bool newFlag = (v == "high");
-      if (newFlag != device_config.extended_channels) {
-        device_config.extended_channels = newFlag;
       }
     }
 
