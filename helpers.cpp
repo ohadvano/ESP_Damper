@@ -67,3 +67,31 @@ bool validateAndParseFrames(std::vector<String> &frames, rx_data_t &rx_data, con
 
     return true;
 }
+
+// Bus wire-format damper angle (0-3) -> HA-visible fan mode label.
+//   angle 0 -> "Low"      (remote button "1")
+//   angle 1 -> "Medium"   (remote button "2")
+//   angle 2 -> "High"     (remote button "3")
+//   angle 3 -> "Auto"
+String damper_angle_to_fan_label(uint8_t angle) {
+    switch (angle) {
+        case 0: return "Low";
+        case 1: return "Medium";
+        case 2: return "High";
+        case 3: return "Auto";
+        default: return "Low";
+    }
+}
+
+// HA fan_mode label -> damper angle (0-3). Case-insensitive since
+// mqtt_callback lowercases the whole incoming payload.
+uint8_t fan_label_to_damper_angle(const String& label) {
+    String v = label;
+    v.trim();
+    v.toLowerCase();
+    if (v == "low")    return 0;
+    if (v == "medium") return 1;
+    if (v == "high")   return 2;
+    if (v == "auto")   return 3;
+    return 0;
+}

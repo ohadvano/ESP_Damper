@@ -3,6 +3,7 @@
 #include "rx.h"
 #include "web.h"
 #include "debug_log.h"
+#include "helpers.h"
 #include "serial_intercept.h"
 
 #define AP_IP       IPAddress(192, 168, 50, 1)
@@ -125,12 +126,11 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
 
   if (jsonDoc.containsKey("state")) {
     state = jsonDoc["state"].as<String>();
-    if (state == "off"){
-        fan = 0x60;
-    }
-    else if (state == "on"){
-        fan = jsonDoc["fan"].as<uint8_t>();
-    }
+  }
+  if (jsonDoc.containsKey("fan")) {
+    // Fan is now a string label ("1", "2", "3", "auto") — convert to
+    // the wire-format damper angle 0..3 that send_tx_payload expects.
+    fan = fan_label_to_damper_angle(jsonDoc["fan"].as<String>());
   }
 
   if (jsonDoc.containsKey("mode")) {
@@ -164,7 +164,7 @@ void public_message(mqtt_data_t data) {
   doc["ch"] = data.ch;
   doc["temp"] = data.temp;
   doc["state"] = data.state;
-  doc["fan"] = data.fan;
+  doc["fan"] = damper_angle_to_fan_label(data.fan);
   doc["mode"] = data.mode;
 
   serializeJson(doc, output);
@@ -282,9 +282,10 @@ static void publish_discovery() {
     modes.add("heat");
 
     JsonArray fan_modes = doc.createNestedArray("fan_modes");
-    fan_modes.add("1");
-    fan_modes.add("2");
-    fan_modes.add("3");
+    fan_modes.add("Low");
+    fan_modes.add("Medium");
+    fan_modes.add("High");
+    fan_modes.add("Auto");
 
     doc["min_temp"]  = 16;
     doc["max_temp"]  = 30;
@@ -329,7 +330,7 @@ static void publish_discovery() {
         ",\"temp\":{{ value | int }}"
         ",\"state\":\"on\""
         ",\"mode\":\"{{ this.state if this.state in ['cool','heat'] else 'cool' }}\""
-        ",\"fan\":{{ this.attributes.fan_mode | int(2) }}}";
+        ",\"fan\":\"{{ this.attributes.fan_mode or 'Auto' }}\"}";
 
     doc["mode_command_topic"]    = rx_topic;
     doc["mode_command_template"] =
@@ -340,14 +341,14 @@ static void publish_discovery() {
         ",\"state\":\"on\""
         ",\"mode\":\"{{ value }}\""
         ",\"temp\":{{ this.attributes.temperature | int(24) }}"
-        ",\"fan\":{{ this.attributes.fan_mode | int(2) }}}"
+        ",\"fan\":\"{{ this.attributes.fan_mode or 'Auto' }}\"}"
         "{% endif %}";
 
     doc["fan_mode_command_topic"]    = rx_topic;
     doc["fan_mode_command_template"] =
         String("{\"ch\":") + ch +
         ",\"state\":\"on\""
-        ",\"fan\":{{ value | int }}"
+        ",\"fan\":\"{{ value }}\""
         ",\"temp\":{{ this.attributes.temperature | int(24) }}"
         ",\"mode\":\"{{ this.state if this.state in ['cool','heat'] else 'cool' }}\"}";
 
