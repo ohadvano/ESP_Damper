@@ -120,17 +120,24 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
     if (ch >= NUM_CHANNELS) return;
   }
 
+  // Preserve last-known temp/fan from mqtt_data when the incoming command
+  // omits them (HA's "off" command template only sends {ch,state}). Prevents
+  // us from echoing temp=0 back and letting HA overwrite its own setpoint.
   if (jsonDoc.containsKey("temp")) {
     temp = jsonDoc["temp"].as<uint8_t>();
+  } else {
+    temp = mqtt_data[ch].temp;
   }
 
   if (jsonDoc.containsKey("state")) {
     state = jsonDoc["state"].as<String>();
   }
   if (jsonDoc.containsKey("fan")) {
-    // Fan is now a string label ("1", "2", "3", "auto") — convert to
+    // Fan is a string label ("low"/"medium"/"high"/"auto") — convert to
     // the wire-format damper angle 0..3 that send_tx_payload expects.
     fan = fan_label_to_damper_angle(jsonDoc["fan"].as<String>());
+  } else {
+    fan = mqtt_data[ch].fan;
   }
 
   if (jsonDoc.containsKey("mode")) {
@@ -257,6 +264,9 @@ static void publish_discovery() {
     return;
   }
 
+  const AcModel model = ac_model_from_string(device_config.ac_model);
+  const bool is_vat6 = (model == AC_MODEL_VAT6);
+
   for (uint8_t ch = 0; ch < NUM_CHANNELS; ++ch) {
     const String unique_id   = base + "_ch" + ch;
     const String object_id   = String("damper_ch") + ch;
@@ -276,10 +286,18 @@ static void publish_discovery() {
     dev["model"]        = "TAC-910 / VAT-6 IR bridge";
     dev["sw_version"]   = FW_VERSION_STR;
 
+    // HVAC modes depend on the AC controller:
+    //   TAC-910: the wall remote is on/off only — cool vs heat is set at
+    //            the AC's central unit. Expose "off" and "auto" (= on).
+    //   VAT-6  : cool/heat is encoded per-frame — expose both explicitly.
     JsonArray modes = doc.createNestedArray("modes");
     modes.add("off");
-    modes.add("cool");
-    modes.add("heat");
+    if (is_vat6) {
+      modes.add("cool");
+      modes.add("heat");
+    } else {
+      modes.add("auto");
+    }
 
     JsonArray fan_modes = doc.createNestedArray("fan_modes");
     fan_modes.add("Low");
@@ -305,52 +323,90 @@ static void publish_discovery() {
     doc["temperature_state_template"]   =
         ch_filter + "{{ value_json.temp }}{% endif %}";
 
-    // mode is "unknown" on TAC-910 RX frames; in that case the template
-    // emits nothing and HA preserves the last known mode.
-    doc["mode_state_topic"]    = tx_topic;
-    doc["mode_state_template"] =
-        ch_filter +
-        "{% if value_json.state == 'off' %}off"
-        "{% elif value_json.mode in ['cool','heat'] %}{{ value_json.mode }}"
-        "{% endif %}{% endif %}";
+    doc["mode_state_topic"] = tx_topic;
+    if (is_vat6) {
+      // VAT-6: mode is real; map cool/heat directly, off from state.
+      doc["mode_state_template"] =
+          ch_filter +
+          "{% if value_json.state == 'off' %}off"
+          "{% elif value_json.mode in ['cool','heat'] %}{{ value_json.mode }}"
+          "{% endif %}{% endif %}";
+    } else {
+      // TAC-910: no cool/heat on the wire — just on/off.
+      doc["mode_state_template"] =
+          ch_filter +
+          "{% if value_json.state == 'off' %}off{% else %}auto{% endif %}"
+          "{% endif %}";
+    }
 
     doc["fan_mode_state_topic"]    = tx_topic;
     doc["fan_mode_state_template"] =
         ch_filter + "{{ value_json.fan }}{% endif %}";
 
-    // Outbound (HA -> device) command templates. Each command carries the
-    // full set of fields the firmware expects so a single MQTT message
-    // represents a complete state. `this` is the climate entity itself;
-    // `this.state` is the current HVAC mode, `this.attributes.*` are the
-    // setpoint and fan mode. Defaults via `| int(N)` and `or 'cool'` keep
-    // commands valid when an attribute hasn't been seen yet.
-    doc["temperature_command_topic"]    = rx_topic;
-    doc["temperature_command_template"] =
-        String("{\"ch\":") + ch +
-        ",\"temp\":{{ value | int }}"
-        ",\"state\":\"on\""
-        ",\"mode\":\"{{ this.state if this.state in ['cool','heat'] else 'cool' }}\""
-        ",\"fan\":\"{{ this.attributes.fan_mode or 'Auto' }}\"}";
+    // Outbound (HA -> device) command templates. `this.state` is the
+    // current HVAC mode, `this.attributes.*` are the setpoint and fan.
+    // We use `or <default>` (rather than `| int(N)`) so that a stale 0
+    // value in HA's state — from any prior bug — still falls back sanely.
+    doc["temperature_command_topic"] = rx_topic;
+    if (is_vat6) {
+      doc["temperature_command_template"] =
+          String("{\"ch\":") + ch +
+          ",\"temp\":{{ value | int }}"
+          ",\"state\":\"on\""
+          ",\"mode\":\"{{ this.state if this.state in ['cool','heat'] else 'cool' }}\""
+          ",\"fan\":\"{{ this.attributes.fan_mode or 'Auto' }}\"}";
+    } else {
+      doc["temperature_command_template"] =
+          String("{\"ch\":") + ch +
+          ",\"temp\":{{ value | int }}"
+          ",\"state\":\"on\""
+          ",\"fan\":\"{{ this.attributes.fan_mode or 'Auto' }}\"}";
+    }
 
-    doc["mode_command_topic"]    = rx_topic;
-    doc["mode_command_template"] =
-        String("{% if value == 'off' %}") +
-        "{\"ch\":" + ch + ",\"state\":\"off\"}"
-        "{% else %}"
-        "{\"ch\":" + ch +
-        ",\"state\":\"on\""
-        ",\"mode\":\"{{ value }}\""
-        ",\"temp\":{{ this.attributes.temperature | int(24) }}"
-        ",\"fan\":\"{{ this.attributes.fan_mode or 'Auto' }}\"}"
-        "{% endif %}";
+    doc["mode_command_topic"] = rx_topic;
+    if (is_vat6) {
+      doc["mode_command_template"] =
+          String("{% if value == 'off' %}") +
+          "{\"ch\":" + ch + ",\"state\":\"off\""
+          ",\"temp\":{{ this.attributes.temperature or 22 }}"
+          ",\"fan\":\"{{ this.attributes.fan_mode or 'Auto' }}\"}"
+          "{% else %}"
+          "{\"ch\":" + ch +
+          ",\"state\":\"on\""
+          ",\"mode\":\"{{ value }}\""
+          ",\"temp\":{{ this.attributes.temperature or 22 }}"
+          ",\"fan\":\"{{ this.attributes.fan_mode or 'Auto' }}\"}"
+          "{% endif %}";
+    } else {
+      // TAC-910: value is 'off' or 'auto'; no mode field on the wire.
+      doc["mode_command_template"] =
+          String("{% if value == 'off' %}") +
+          "{\"ch\":" + ch + ",\"state\":\"off\""
+          ",\"temp\":{{ this.attributes.temperature or 22 }}"
+          ",\"fan\":\"{{ this.attributes.fan_mode or 'Auto' }}\"}"
+          "{% else %}"
+          "{\"ch\":" + ch +
+          ",\"state\":\"on\""
+          ",\"temp\":{{ this.attributes.temperature or 22 }}"
+          ",\"fan\":\"{{ this.attributes.fan_mode or 'Auto' }}\"}"
+          "{% endif %}";
+    }
 
-    doc["fan_mode_command_topic"]    = rx_topic;
-    doc["fan_mode_command_template"] =
-        String("{\"ch\":") + ch +
-        ",\"state\":\"on\""
-        ",\"fan\":\"{{ value }}\""
-        ",\"temp\":{{ this.attributes.temperature | int(24) }}"
-        ",\"mode\":\"{{ this.state if this.state in ['cool','heat'] else 'cool' }}\"}";
+    doc["fan_mode_command_topic"] = rx_topic;
+    if (is_vat6) {
+      doc["fan_mode_command_template"] =
+          String("{\"ch\":") + ch +
+          ",\"state\":\"on\""
+          ",\"fan\":\"{{ value }}\""
+          ",\"temp\":{{ this.attributes.temperature or 22 }}"
+          ",\"mode\":\"{{ this.state if this.state in ['cool','heat'] else 'cool' }}\"}";
+    } else {
+      doc["fan_mode_command_template"] =
+          String("{\"ch\":") + ch +
+          ",\"state\":\"on\""
+          ",\"fan\":\"{{ value }}\""
+          ",\"temp\":{{ this.attributes.temperature or 22 }}}";
+    }
 
     static char buffer[2560];
     size_t n = serializeJson(doc, buffer, sizeof(buffer));
