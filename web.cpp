@@ -7,6 +7,15 @@
 #include "ac_model.h"
 #include "serial_intercept.h"
 
+// SSE endpoint for live-streaming the debug log to browser clients.
+static AsyncEventSource log_events("/logstream");
+
+static void stream_log_line_to_sse(const String& line) {
+  // AsyncEventSource.send() is safe to call from any task; it queues
+  // per-client and returns immediately if no clients are connected.
+  log_events.send(line.c_str(), "log", millis());
+}
+
 // --------- Helpers ---------
 static String htmlEscape(const String& in) {
   String out;
@@ -261,9 +270,13 @@ static String buildConfigPageHtml() {
       "<div class='section'>"
       "<div class='field'>"
 
-      "<div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;'>"
+      "<div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;gap:6px;flex-wrap:wrap;'>"
       "<div style='font-size:16px;font-weight:400;'>Debug Log</div>"
+      "<div style='display:flex;gap:6px;'>"
+      "<button type='button' id='rawPauseBtn' class='rawClearBtn'>Pause</button>"
+      "<button type='button' id='rawCopyBtn' class='rawClearBtn'>Copy</button>"
       "<button type='button' class='rawClearBtn' onclick='clearRawLog()'>Clear</button>"
+      "</div>"
       "</div>"
 
       "<pre id='rawlog' "
@@ -355,38 +368,113 @@ static String buildConfigPageHtml() {
     "refreshStatus();setInterval(refreshStatus,1000);"
     
    "let rawLastSeq = 0;"
+    "let rawLastText = '';"
+    "let rawPaused = false;"
+
+    "const rawPauseBtn = document.getElementById('rawPauseBtn');"
+    "if (rawPauseBtn) {"
+    "  rawPauseBtn.addEventListener('click', () => {"
+    "    rawPaused = !rawPaused;"
+    "    rawPauseBtn.textContent = rawPaused ? 'Resume' : 'Pause';"
+    "    rawPauseBtn.style.background = rawPaused ? '#d64a42' : '';"
+    "  });"
+    "}"
+
+    "const rawCopyBtn = document.getElementById('rawCopyBtn');"
+    "if (rawCopyBtn) {"
+    "  rawCopyBtn.addEventListener('click', async () => {"
+    "    const el = document.getElementById('rawlog');"
+    "    if (!el) return;"
+    "    const text = el.textContent || '';"
+    "    const orig = rawCopyBtn.textContent;"
+    "    let ok = false;"
+    "    if (navigator.clipboard && window.isSecureContext) {"
+    "      try { await navigator.clipboard.writeText(text); ok = true; } catch (e) {}"
+    "    }"
+    "    if (!ok) {"
+    "      const ta = document.createElement('textarea');"
+    "      ta.value = text;"
+    "      ta.style.position = 'fixed'; ta.style.left = '-9999px'; ta.style.top = '0';"
+    "      document.body.appendChild(ta);"
+    "      ta.focus(); ta.select();"
+    "      try { ok = document.execCommand('copy'); } catch (e) {}"
+    "      document.body.removeChild(ta);"
+    "    }"
+    "    rawCopyBtn.textContent = ok ? 'Copied!' : 'Copy failed';"
+    "    setTimeout(() => rawCopyBtn.textContent = orig, 1200);"
+    "  });"
+    "}"
+
+    "function rawSelectionInside(el) {"
+    "  const s = window.getSelection();"
+    "  if (!s || s.rangeCount === 0 || s.isCollapsed) return false;"
+    "  return el.contains(s.getRangeAt(0).commonAncestorContainer);"
+    "}"
+
+    // Always fetch so the server keeps the UI marked active — see
+    // web_log_mark_ui_active_and_clear_if_needed() in debug_log.cpp.
+    // Only the DOM update is gated on Pause / selection / unchanged text.
     "async function pollRawLog() {"
     "  const el = document.getElementById('rawlog');"
     "  if (!el) return;"
+    "  let j;"
     "  try {"
     "    const r = await fetch('/rawlog', {cache:'no-store'});"
-    "    const j = await r.json();"
-    "    if (j.enabled === false) return;"
-    "    if (!j.lines) return;"
-    "    let text = '';"
-    "    let maxSeq = rawLastSeq;"
-    "    for (const item of j.lines) {"
-    "      text += item.text + '\\n';"
-    "      if (item.seq > maxSeq) maxSeq = item.seq;"
-    "    }"
-    "    const hasNewData = maxSeq > rawLastSeq;"
-    "    el.textContent = text || 'No debug output yet.';"
-    "    if (hasNewData) {"
-    "      el.scrollTop = el.scrollHeight;"
-    "    }"
-    "    rawLastSeq = maxSeq;"
+    "    j = await r.json();"
     "  } catch (e) {"
-    "    el.textContent = 'Debug log fetch failed: ' + e;"
+    "    if (!rawPaused && !rawSelectionInside(el)) {"
+    "      el.textContent = 'Debug log fetch failed: ' + e;"
+    "    }"
+    "    return;"
     "  }"
+    "  if (j.enabled === false) return;"
+    "  if (!j.lines) return;"
+    "  let text = '';"
+    "  let maxSeq = rawLastSeq;"
+    "  for (const item of j.lines) {"
+    "    text += item.text + '\\n';"
+    "    if (item.seq > maxSeq) maxSeq = item.seq;"
+    "  }"
+    "  text = text || 'No debug output yet.';"
+    "  rawLastSeq = maxSeq;"
+    "  if (rawPaused) return;"
+    "  if (rawSelectionInside(el)) return;"
+    "  if (text === rawLastText) return;"
+    "  const atBottom = (el.scrollHeight - el.scrollTop - el.clientHeight) < 30;"
+    "  el.textContent = text;"
+    "  rawLastText = text;"
+    "  if (atBottom) el.scrollTop = el.scrollHeight;"
     "}"
     "async function clearRawLog() {"
     "  await fetch('/rawlog/clear', { method: 'POST' });"
     "  rawLastSeq = 0;"
+    "  rawLastText = '';"
     "  const el = document.getElementById('rawlog');"
     "  if (el) el.textContent = 'No debug output yet.';"
     "}"
-    "setInterval(pollRawLog, 1000);"
+    // Initial history load via /rawlog, then live updates via SSE.
+    // No periodic polling needed — the debug log stream pushes every new
+    // line via server-sent events.
     "pollRawLog();"
+    "if (typeof EventSource !== 'undefined') {"
+    "  const es = new EventSource('/logstream');"
+    "  es.addEventListener('log', (e) => {"
+    "    const el = document.getElementById('rawlog');"
+    "    if (!el) return;"
+    "    if (rawPaused) return;"
+    "    if (rawSelectionInside(el)) return;"
+    "    let current = el.textContent;"
+    "    if (current === 'Waiting for debug output...' || current === 'No debug output yet.') {"
+    "      current = '';"
+    "    }"
+    "    const atBottom = (el.scrollHeight - el.scrollTop - el.clientHeight) < 30;"
+    "    let newText = current + e.data + '\\n';"
+    "    if (newText.length > 5000000) newText = newText.slice(-4000000);"
+    "    el.textContent = newText;"
+    "    rawLastText = newText;"
+    "    if (atBottom) el.scrollTop = el.scrollHeight;"
+    "  });"
+    "}"
     "</script>"
   );
 
@@ -401,6 +489,11 @@ static String buildConfigPageHtml() {
 
 // --------- Route registrations ---------
 void web_begin(AsyncWebServer& server, PubSubClient& mqttClient) {
+
+  // SSE: live debug-log stream. Client opens EventSource('/logstream'),
+  // server pushes one 'log' event per stored line via stream_log_line_to_sse.
+  server.addHandler(&log_events);
+  web_log_set_stream_callback(&stream_log_line_to_sse);
 
   server.on("/logo.png", HTTP_GET, [](AsyncWebServerRequest *request) {
     AsyncWebServerResponse *response = request->beginResponse_P(200, "image/png", (const uint8_t*)LOGO_PNG, LOGO_PNG_LEN);

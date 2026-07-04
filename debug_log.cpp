@@ -17,6 +17,12 @@ static String partial_line;
 
 static portMUX_TYPE web_log_mux = portMUX_INITIALIZER_UNLOCKED;
 
+static web_log_stream_cb_t line_stream_cb = nullptr;
+
+void web_log_set_stream_callback(web_log_stream_cb_t cb) {
+  line_stream_cb = cb;
+}
+
 
 // --------- Temporary boot/pre-UI buffer ---------
 
@@ -67,6 +73,12 @@ static void web_log_store_line_raw(const String& line) {
   web_head = (web_head + 1) % WEB_LOG_LINES;
 
   portEXIT_CRITICAL(&web_log_mux);
+
+  // Push to any live-stream subscribers (SSE). Outside the mutex so the
+  // callback can allocate / do network work without inversion risk.
+  if (line_stream_cb) {
+    line_stream_cb(line);
+  }
 }
 
 static void boot_log_store_line(const String& text) {
@@ -136,7 +148,10 @@ static void web_log_store_line(const String& text) {
   if (!device_config.debug_verbose) return;
   if (text.length() == 0) return;
 
-  if (!web_log_ui_active()) {
+  // Only route to the boot log while it's still open (pre-first-UI-connect
+  // window). Once boot_closed, always land in the main ring buffer so
+  // brief UI-inactive periods don't silently drop lines.
+  if (!boot_closed && !web_log_ui_active()) {
     boot_log_store_line(text);
     return;
   }
@@ -181,7 +196,10 @@ void web_log_mark_ui_active_and_clear_if_needed() {
   web_ui_last_seen_ms = millis();
 
   if (was_inactive) {
-    web_log_clear();
+    // Only flush the boot log — no clearing of the main ring buffer.
+    // Clearing on every inactive->active transition wipes valid history
+    // whenever the browser throttles the poll or the WiFi hiccups for >3 s,
+    // which is what causes the "No debug output yet." symptom in the UI.
     boot_log_flush_to_web_log_once();
   }
 }
@@ -223,7 +241,10 @@ void web_log_write(const uint8_t* data, size_t len) {
 }
 
 String web_log_json() {
-  StaticJsonDocument<8192> doc;
+  // Heap-allocated: at 200 lines * up to ~256 bytes each + per-object
+  // ArduinoJson overhead, worst-case size is ~60 KB — well past any
+  // reasonable task-stack budget, so keep this on the heap.
+  DynamicJsonDocument doc(65536);
   JsonArray arr = doc.createNestedArray("lines");
 
   portENTER_CRITICAL(&web_log_mux);

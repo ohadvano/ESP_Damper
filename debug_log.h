@@ -3,7 +3,7 @@
 #include <Arduino.h>
 #include "globals.h"
 
-#define WEB_LOG_LINES        64
+#define WEB_LOG_LINES        200
 #define WEB_LOG_LINE_MAX     256
 #define WEB_LOG_UI_ACTIVE_MS 3000
 
@@ -19,6 +19,12 @@ void web_log_add_line(const String& line);
 
 String web_log_json();
 void web_log_clear();
+
+// Live streaming (SSE): invoked once per stored line, after the line is in
+// the ring buffer. Called outside the ring-buffer mutex so callers may push
+// to network handlers freely.
+typedef void (*web_log_stream_cb_t)(const String& line);
+void web_log_set_stream_callback(web_log_stream_cb_t cb);
 
 bool web_log_ui_active();
 void web_log_mark_ui_active();
