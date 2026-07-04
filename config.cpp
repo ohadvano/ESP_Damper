@@ -23,7 +23,8 @@ void config_set_defaults() {
   device_config.mqtt_pass[0] = '\0';
 
   device_config.debug_verbose = false;
-  device_config.ack_en = true;
+  device_config.rx_ack_en = true;
+  device_config.tx_ack_en = true;
 
   // AC controller model
   // Supported values:

@@ -223,15 +223,29 @@ static String buildConfigPageHtml() {
     "</div></div>"
   );
 
- // ACK/NACK enable
+ // RX ACK/NACK enable
   html += F(
     "<div class='section'>"
     "<div class='field' style='display:flex;align-items:center;justify-content:space-between;'>"
-    "<div style='font-size:16px;font-weight:400;'>ACK/NACK verification</div>"
+    "<div style='font-size:16px;font-weight:400;'>RX ACK/NACK verification</div>"
     "<label class='switch'>"
-    "<input type='checkbox' name='ack_en' value='1' "
+    "<input type='checkbox' name='rx_ack_en' value='1' "
   );
-  html += device_config.ack_en ? "checked" : "";
+  html += device_config.rx_ack_en ? "checked" : "";
+  html += F(
+    "><span class='slider'></span></label>"
+    "</div></div>"
+  );
+
+  // TX ACK/NACK enable
+  html += F(
+    "<div class='section'>"
+    "<div class='field' style='display:flex;align-items:center;justify-content:space-between;'>"
+    "<div style='font-size:16px;font-weight:400;'>TX ACK/NACK verification</div>"
+    "<label class='switch'>"
+    "<input type='checkbox' name='tx_ack_en' value='1' "
+  );
+  html += device_config.tx_ack_en ? "checked" : "";
   html += F(
     "><span class='slider'></span></label>"
     "</div></div>"
@@ -533,7 +547,8 @@ void web_begin(AsyncWebServer& server, PubSubClient& mqttClient) {
     update_str_if_changed("muser",   device_config.mqtt_user, sizeof(device_config.mqtt_user));
    
     device_config.debug_verbose = request->hasParam("debug", true);
-    device_config.ack_en = request->hasParam("ack_en", true);
+    device_config.rx_ack_en = request->hasParam("rx_ack_en", true);
+    device_config.tx_ack_en = request->hasParam("tx_ack_en", true);
     device_config.enable_discovery = request->hasParam("discovery", true);
 
     if (device_config.wifi_ssid[0] == '\0') device_config.wifi_pass[0] = '\0';

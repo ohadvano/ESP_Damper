@@ -14,7 +14,8 @@ typedef struct {
     char mqtt_user[32];
     char mqtt_pass[64];
     bool debug_verbose;
-    bool ack_en;
+    bool rx_ack_en;
+    bool tx_ack_en;
     char ac_model[16];
     bool enable_discovery;
 } device_config_t;

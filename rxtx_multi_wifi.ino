@@ -65,16 +65,16 @@ void setup() {
 void loop() {
     wireless_loop();
 
-    // Handle RX -> MQTT transaction 
+    // Handle RX -> MQTT transaction
     if (parseRMTData(device_config.ac_model)) {
         for (uint8_t ch = 0; ch < NUM_CHANNELS; ++ch) {
             if (rx_new_data[ch]) {
                 rx_new_data[ch] = false;
-                if (device_config.ack_en) {
+                if (device_config.rx_ack_en) {
                     ack_irq_start(ch);
                     ack_gpio_init(ch);
                 }
-                
+
                 mqtt_data[ch].ch = ch;
                 mqtt_data[ch].temp = rx_data[ch].temp;
                 mqtt_data[ch].state = rx_data[ch].state;
@@ -84,18 +84,18 @@ void loop() {
             }
         }
     }
-         
+
     // Handle MQTT -> TX transaction
     for (uint8_t ch = 0; ch < NUM_CHANNELS; ++ch) {
-        if (tx_requests[ch].pending && !mqtt_data[ch].pending) {         
+        if (tx_requests[ch].pending && !mqtt_data[ch].pending) {
             send_tx_payload(ch, CHANNEL_GPIOS[ch], tx_requests[ch].temp, tx_requests[ch].state == "on", tx_requests[ch].fan, tx_requests[ch].mode);
 
             reconfig_rmt_rx_channel(ch, CHANNEL_GPIOS[ch]);
-            if (device_config.ack_en) {
+            if (device_config.tx_ack_en) {
                 ack_irq_start(ch);
                 ack_gpio_init(ch);
             }
-            
+
             mqtt_data[ch].ch = ch;
             mqtt_data[ch].temp = tx_requests[ch].temp;
             mqtt_data[ch].state = tx_requests[ch].state;
@@ -105,13 +105,20 @@ void loop() {
         }
     }
 
-    // Handle ACK signal and send MQTT message
+    // Handle ACK signal and send MQTT message.
+    // Distinguish RX vs TX by tx_requests[ch].pending: TX sets it before we
+    // reach here; RX never touches it. That determines which ack_en flag
+    // gates the publish (rx_ack_en for RX, tx_ack_en for TX).
     for (uint8_t ch = 0; ch < NUM_CHANNELS; ++ch) {
-        if (mqtt_data[ch].pending && (ack_active[ch] || !device_config.ack_en)){
-            public_message(mqtt_data[ch]);
-            tx_requests[ch].pending = false;
-            ack_active[ch] = false;
-            mqtt_data[ch].pending = false;
+        if (mqtt_data[ch].pending) {
+            bool is_tx = tx_requests[ch].pending;
+            bool ack_gated = is_tx ? device_config.tx_ack_en : device_config.rx_ack_en;
+            if (ack_active[ch] || !ack_gated) {
+                public_message(mqtt_data[ch]);
+                tx_requests[ch].pending = false;
+                ack_active[ch] = false;
+                mqtt_data[ch].pending = false;
+            }
         }
     }
 
