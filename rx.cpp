@@ -19,16 +19,24 @@ size_t rx_last_call[NUM_CHANNELS] = {0};
 rmt_channel_handle_t rx_channel[NUM_CHANNELS] = {NULL};
 rx_data_t rx_data[NUM_CHANNELS] = {};
 volatile bool rx_new_data[NUM_CHANNELS] = {};
-size_t ack_timer[NUM_CHANNELS] = {0};
 bool ack_active[NUM_CHANNELS] = {false};
 bool ack_timeout[NUM_CHANNELS] = {false};
 size_t ack_width[NUM_CHANNELS] = {0};
 size_t ack_width_dbg[NUM_CHANNELS] = {0};
 
+// ---- Permanent-ISR ACK detection state ----
+// The GPIO ISR is installed once at boot (ack_gpio_init) and runs
+// continuously, tracking every falling and rising edge on the channel
+// GPIO. These variables are the always-on rolling state that lets
+// ack_irq_start() detect an ACK retrospectively — if the ACK's edges
+// arrived while parseRMTData or send_tx_payload were still running.
+static volatile uint32_t last_falling_us[NUM_CHANNELS]  = {0};  // most recent falling edge
+static volatile uint32_t last_rising_us[NUM_CHANNELS]   = {0};  // most recent rising edge (ended a pulse)
+static volatile uint32_t last_pulse_width[NUM_CHANNELS] = {0};  // width of the most recent completed low pulse
+static volatile bool     ack_watch[NUM_CHANNELS]        = {false}; // true while actively looking for an ACK
+#define ACK_RETRO_WINDOW_US 500000  // accept a completed pulse ending within the last 500 ms
+
 // ---- ACK-window diagnostics (see globals.h for meaning) ----
-// Populated by the ISR and RX/TX arming paths, consumed by the loop's
-// timing-log emitter when both debug_verbose and timing_diagnostics_en
-// are enabled in the web UI.
 volatile uint32_t ack_dbg_frame_end_time[NUM_CHANNELS]  = {0};
 volatile uint32_t ack_dbg_start_time[NUM_CHANNELS]      = {0};
 volatile uint32_t ack_dbg_gpio_init_time[NUM_CHANNELS]  = {0};
@@ -62,12 +70,11 @@ void ack_irq_init(uint8_t ch) {
 
 void ack_irq_start(uint8_t ch) {
     ack_timeout[ch] = false;
+    ack_active[ch]  = false;
 
-    // Reset per-window diagnostic counters and timing markers so the
-    // NACK diag / ACK-success log can reconstruct exactly what happened
-    // during this ACK window.
+    // Reset per-window diagnostic counters and timing markers so we can
+    // reconstruct exactly what happened during this ACK window.
     ack_dbg_start_time[ch]      = micros();
-    ack_dbg_gpio_init_time[ch]  = 0;
     ack_dbg_first_fall_time[ch] = 0;
     ack_dbg_last_rise_time[ch]  = 0;
     ack_dbg_falling_count[ch]   = 0;
@@ -77,16 +84,51 @@ void ack_irq_start(uint8_t ch) {
     for (uint8_t i = 0; i < ACK_DBG_HISTORY; i++) {
         ack_dbg_pulse_history[ch][i] = 0;
     }
+    // Note: ack_dbg_gpio_init_time is NOT reset — it holds the boot-time
+    // install timestamp for the (now permanent) ISR.
 
+    // Retrospective: did a valid ACK complete within the last 500 ms?
+    // Covers the case where parseRMTData / send_tx_payload were still
+    // running when the ACK's rising edge fired. The permanent ISR has
+    // already recorded it into last_pulse_width / last_rising_us.
+    uint32_t now = micros();
+    if (last_pulse_width[ch] > 500000 &&
+        last_rising_us[ch] != 0 &&
+        (now - last_rising_us[ch]) < ACK_RETRO_WINDOW_US) {
+        ack_active[ch] = true;
+        ack_width[ch]  = last_pulse_width[ch];
+        // Mirror into diagnostics so the ACK-success log has a consistent
+        // "when did we detect it" view.
+        ack_dbg_last_rise_time[ch] = last_rising_us[ch];
+        // Consume so a stale pulse isn't reused on the next call.
+        last_pulse_width[ch] = 0;
+        return;
+    }
+
+    // Prospective: arm the watch flag and start the 2.2 s NACK timer.
+    // The ISR is already listening; it will latch ack_active when it
+    // sees a rising edge with width > 500 ms.
+    ack_watch[ch] = true;
     ESP_ERROR_CHECK(esp_timer_start_once(oneshot_timer[ch], 2200000));
 }
 
 void ack_irq_stop(uint8_t ch) {
     ack_timeout[ch] = false;
-    ESP_ERROR_CHECK(esp_timer_stop(oneshot_timer[ch]));
+    ack_watch[ch]   = false;
+    // Not wrapped in ESP_ERROR_CHECK: stopping a not-running timer is a
+    // benign error, and this is called both when we caught an ACK
+    // (timer might be running) and defensively from paths where it
+    // isn't (retrospective branch didn't start it).
+    esp_timer_stop(oneshot_timer[ch]);
 }
 
 void ack_gpio_init(uint8_t ch) {
+    // Install the ACK GPIO ISR PERMANENTLY. Called once per channel at
+    // boot from setup(). Because the ISR is always listening, ACK
+    // detection can't miss the falling edge just because parseRMTData /
+    // send_tx_payload are still running — the ISR captures the edge
+    // into last_falling_us / last_pulse_width, and ack_irq_start() picks
+    // it up retrospectively.
     gpio_config_t io_conf = {
         .pin_bit_mask = 1ULL << CHANNEL_GPIOS[ch],
         .mode = GPIO_MODE_INPUT,
@@ -95,22 +137,23 @@ void ack_gpio_init(uint8_t ch) {
         .intr_type = GPIO_INTR_ANYEDGE,
     };
     ESP_ERROR_CHECK(gpio_config(&io_conf));
-    ESP_ERROR_CHECK(gpio_isr_handler_add(CHANNEL_GPIOS[ch], ack_gpio_isr, (void *)ch));
+    ESP_ERROR_CHECK(gpio_isr_handler_add(CHANNEL_GPIOS[ch], ack_gpio_isr, (void *)(intptr_t)ch));
     ack_dbg_gpio_init_time[ch] = micros();
     ack_dbg_isr_attached[ch] = true;
 }
 
 void ack_gpio_remove(uint8_t ch) {
-    ESP_ERROR_CHECK(gpio_isr_handler_remove(CHANNEL_GPIOS[ch]));
-    ack_timer[ch] = 0;
-    ack_dbg_isr_attached[ch] = false;
+    // No-op: the ISR is permanently attached now. Kept as a stub so any
+    // remaining callers don't break.
+    (void)ch;
 }
 
 void IRAM_ATTR oneshot_timer_callback(void *arg) {
     int ch = (int)(intptr_t)arg;
     ack_timeout[ch] = true;
-    ack_width[ch] = 0;
-    ack_gpio_remove(ch);
+    ack_width[ch]   = 0;
+    ack_watch[ch]   = false;
+    // ISR stays attached — do NOT call ack_gpio_remove here.
 }
 
 void IRAM_ATTR ack_gpio_isr(void *arg) {
@@ -118,40 +161,69 @@ void IRAM_ATTR ack_gpio_isr(void *arg) {
     bool state = digitalRead(CHANNEL_GPIOS[ch]);
     uint32_t now = micros();
 
-    if (state) {  // Rising edge → pulse end
-        // Diagnostics: count and remember this rising edge.
+    if (state) {
+        // Rising edge — the low pulse just ended.
         ack_dbg_rising_count[ch]++;
         ack_dbg_last_rise_time[ch] = now;
 
-        uint32_t width = now - ack_timer[ch];
-        ack_width[ch] = width;
+        // Compute width only if we have a captured falling-edge timestamp.
+        if (last_falling_us[ch] != 0) {
+            uint32_t width = now - last_falling_us[ch];
 
-        // Only track the width in diagnostics when we have a real
-        // falling→rising pair (ack_timer != 0). Otherwise "width" is a
-        // bogus now - 0 = uptime value and would pollute the stats.
-        if (ack_timer[ch] != 0) {
+            // Rolling always-on state (used by retrospective check).
+            last_pulse_width[ch] = width;
+            last_rising_us[ch]   = now;
+
+            // Diagnostics (per-window).
             if (width > ack_dbg_max_width[ch]) ack_dbg_max_width[ch] = width;
-
             uint8_t p = ack_dbg_pulse_history_pos[ch];
             ack_dbg_pulse_history[ch][p] = width;
             ack_dbg_pulse_history_pos[ch] = (p + 1) % ACK_DBG_HISTORY;
+            ack_width_dbg[ch] = width;
 
-            if (width > 500000) { // 500000
+            // Prospective ACK detection (standard path): a single clean
+            // >500 ms low pulse between the most recent falling edge and
+            // this rising edge. Works for the typical case.
+            if (ack_watch[ch] && width > 500000) {
                 ack_active[ch] = true;
-                ack_gpio_remove(ch);
-                ack_irq_stop(ch);
+                ack_watch[ch]  = false;
+                ack_width[ch]  = width;
             }
         }
 
-        ack_width_dbg[ch] = width;
+        // Prospective ACK detection (robust fallback): the ISR can miss
+        // an intermediate rising edge under load — WiFi/MQTT preemption,
+        // motor-noise bounce, or two edges arriving faster than the GPIO
+        // interrupt can be serviced. When that happens, `last_falling_us`
+        // gets clobbered by a spurious later falling edge (e.g. motor
+        // engagement noise) and the standard width above comes out too
+        // small to detect. Recover by measuring from the FIRST captured
+        // falling in this watch window to now — if we're still on the
+        // first captured rising, no intermediate rising was properly
+        // seen, and the elapsed span exceeds 500 ms, then the bus was
+        // effectively LOW for the ACK's full duration and we accept it.
+        if (ack_watch[ch] &&
+            ack_dbg_rising_count[ch] == 1 &&
+            ack_dbg_first_fall_time[ch] != 0) {
+            uint32_t alt_width = now - ack_dbg_first_fall_time[ch];
+            if (alt_width > 500000) {
+                ack_active[ch] = true;
+                ack_watch[ch]  = false;
+                ack_width[ch]  = alt_width;
+            }
+        }
+    } else {
+        // Falling edge — a new low pulse just started. Always update
+        // the rolling last-falling timestamp so subsequent rising edges
+        // measure width from the LATEST falling edge, not the first-ever
+        // one since boot.
+        last_falling_us[ch] = now;
 
-    }
-    else {  // Falling edge → pulse start
-        // Diagnostics: count and remember this falling edge.
+        // Diagnostics (per-window).
         ack_dbg_falling_count[ch]++;
-        if (ack_dbg_first_fall_time[ch] == 0) ack_dbg_first_fall_time[ch] = now;
-
-        if (ack_timer[ch] == 0) ack_timer[ch] = now;
+        if (ack_dbg_first_fall_time[ch] == 0) {
+            ack_dbg_first_fall_time[ch] = now;
+        }
     }
 }
 
@@ -171,9 +243,9 @@ bool rmt_rx_done_callback(rmt_channel_handle_t channel, const rmt_rx_done_event_
         if (rx_data_chunk[ch] == RX_FRAMES) {
             rx_data_chunk[ch] = 0;
             data_ready[ch] = true;
-            // Diagnostics: latest RMT callback for the 3rd frame — RMT is
-            // now idle for this channel; anything on the bus after this
-            // is the TAC-910's response.
+            // Latest RMT callback for the 3rd frame — the RMT peripheral
+            // is now idle for this channel; the next thing on the bus is
+            // whatever the TAC-910 is about to send.
             ack_dbg_frame_end_time[ch] = micros();
         }
     }

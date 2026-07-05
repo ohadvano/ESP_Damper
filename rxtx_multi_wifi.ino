@@ -49,12 +49,17 @@ void setup() {
     wireless_setup();
 
     Serial.println("Starting RMT RX/TX multi channel...");
+    // gpio_install_isr_service() must be called before gpio_isr_handler_add,
+    // which happens inside ack_gpio_init(). Moved before the loop for that
+    // reason (previously it ran after the loop, which was fine only because
+    // ack_gpio_init was dynamic — now that it's permanent, order matters).
+    ESP_ERROR_CHECK(gpio_install_isr_service(0));
     for (uint8_t ch = 0; ch < NUM_CHANNELS; ++ch) {
         rmt_rx_channel_config(ch, CHANNEL_GPIOS[ch]);
         ack_irq_init(ch);
+        ack_gpio_init(ch);   // Permanent ISR install — see rx.cpp:ack_gpio_isr
         rx_last_call[ch] = micros();
     }
-    ESP_ERROR_CHECK(gpio_install_isr_service(0));
     
     Serial.print("Device serving channels: 0-");
     Serial.println(NUM_CHANNELS - 1);
@@ -77,19 +82,20 @@ void loop() {
                 rx_new_data[ch] = false;
                 if (device_config.rx_ack_en) {
                     ack_irq_start(ch);
-                    ack_gpio_init(ch);
+                    // The ISR was installed once at setup and is always
+                    // running; no per-op ack_gpio_init call needed. If the
+                    // ACK already fired while parseRMTData was running,
+                    // ack_irq_start() catches it retrospectively and sets
+                    // ack_active immediately (no timer started).
                     if (device_config.debug_verbose && device_config.timing_diagnostics_en) {
-                        // "Frame end → ISR armed" latency. If this exceeds
-                        // how quickly the TAC-910 fires its ACK's falling
-                        // edge after the frame, we've missed the edge.
-                        uint32_t frame_to_arm = ack_dbg_gpio_init_time[ch] - ack_dbg_frame_end_time[ch];
-                        uint32_t start_to_arm = ack_dbg_gpio_init_time[ch] - ack_dbg_start_time[ch];
-                        public_debug_message(String("Ch ") + ch + " RX ACK armed"
-                                             " frame_end=" + String(ack_dbg_frame_end_time[ch]) +
-                                             " arm=" + String(ack_dbg_gpio_init_time[ch]) +
-                                             " frame_to_arm=" + String(frame_to_arm) + "us"
-                                             " irq_to_arm=" + String(start_to_arm) + "us"
-                                             " parse_us=" + String(parse_us) + "us");
+                        uint32_t frame_to_start = ack_dbg_start_time[ch] - ack_dbg_frame_end_time[ch];
+                        const char* how = ack_active[ch] ? "retrospective" : "prospective";
+                        public_debug_message(String("Ch ") + ch + " RX ACK arm mode=" + how +
+                                             " frame_to_start=" + String(frame_to_start) + "us"
+                                             " parse_us=" + String(parse_us) + "us" +
+                                             (ack_active[ch]
+                                                 ? String(" retro_width=") + String(ack_width[ch]) + "us"
+                                                 : String("")));
                     }
                 }
 
@@ -111,19 +117,19 @@ void loop() {
             uint32_t tx_end_us = micros();
 
             reconfig_rmt_rx_channel(ch, CHANNEL_GPIOS[ch]);
-            uint32_t reconfig_end_us = micros();
 
             if (device_config.tx_ack_en) {
                 ack_irq_start(ch);
-                ack_gpio_init(ch);
                 if (device_config.debug_verbose && device_config.timing_diagnostics_en) {
-                    uint32_t tx_to_arm = ack_dbg_gpio_init_time[ch] - tx_end_us;
-                    public_debug_message(String("Ch ") + ch + " TX ACK armed"
+                    uint32_t tx_to_start = ack_dbg_start_time[ch] - tx_end_us;
+                    const char* how = ack_active[ch] ? "retrospective" : "prospective";
+                    public_debug_message(String("Ch ") + ch + " TX ACK arm mode=" + how +
                                          " tx_start=" + String(tx_start_us) +
                                          " tx_end=" + String(tx_end_us) +
-                                         " reconfig_end=" + String(reconfig_end_us) +
-                                         " arm=" + String(ack_dbg_gpio_init_time[ch]) +
-                                         " tx_to_arm=" + String(tx_to_arm) + "us");
+                                         " tx_to_start=" + String(tx_to_start) + "us" +
+                                         (ack_active[ch]
+                                             ? String(" retro_width=") + String(ack_width[ch]) + "us"
+                                             : String("")));
                 }
             }
 
@@ -149,6 +155,14 @@ void loop() {
                 tx_requests[ch].pending = false;
                 ack_active[ch] = false;
                 mqtt_data[ch].pending = false;
+                // Cancel the 2.2 s NACK timer and suppress any phantom
+                // timeout that fired in the same loop iteration as the
+                // ISR set ack_active. Prevents the "command failed"
+                // message from following a successful publish.
+                if (ack_gated) {
+                    ack_irq_stop(ch);
+                    ack_timeout[ch] = false;
+                }
             }
         }
     }
@@ -156,9 +170,10 @@ void loop() {
     // Handle NACK signal
     for (uint8_t ch = 0; ch < NUM_CHANNELS; ++ch) {
         if (ack_timeout[ch]) {
-            // Optional full diagnostic dump. The "command failed" line
-            // below is unconditional — HA/users should always see the
-            // actual failure message.
+            // Full diagnostic dump — gated on timing_diagnostics_en so it
+            // doesn't spam the log in normal operation. The "command failed"
+            // line below stays unconditional; HA/users should always see
+            // the actual failure message.
             if (device_config.debug_verbose && device_config.timing_diagnostics_en) {
                 uint32_t now_us     = micros();
                 uint32_t elapsed_us = now_us - ack_dbg_start_time[ch];
@@ -167,9 +182,6 @@ void loop() {
                     : 0;
                 uint32_t last_rise_delta = ack_dbg_last_rise_time[ch]
                     ? (int32_t)(ack_dbg_last_rise_time[ch] - ack_dbg_start_time[ch])
-                    : 0;
-                uint32_t arm_delta = ack_dbg_gpio_init_time[ch]
-                    ? (int32_t)(ack_dbg_gpio_init_time[ch] - ack_dbg_start_time[ch])
                     : 0;
 
                 // Dump the pulse history ring buffer (last N completed
@@ -183,7 +195,6 @@ void loop() {
 
                 public_debug_message(String("Ch ") + ch + " NACK diag:"
                     " elapsed=" + String(elapsed_us) + "us"
-                    " arm_delta=" + String(arm_delta) + "us"
                     " first_fall_delta=" + String(first_fall_delta) + "us"
                     " last_rise_delta=" + String(last_rise_delta) + "us"
                     " fall_cnt=" + String(ack_dbg_falling_count[ch]) +
@@ -193,6 +204,7 @@ void loop() {
                     " history=[" + history + "]");
             }
             public_debug_message("Ch " + String(ch) + " command failed");
+
             mqtt_data[ch].pending = false;
             tx_requests[ch].pending = false;
             ack_timeout[ch] = false;
@@ -202,15 +214,24 @@ void loop() {
     for (uint8_t ch = 0; ch < NUM_CHANNELS; ++ch) {
         if (ack_width[ch] > 0) {
             if (device_config.debug_verbose && device_config.timing_diagnostics_en) {
-                // Successful ACK: report the width, the deltas relative to
-                // arming, and how many edges we saw during the window.
-                int32_t detect_delta = ack_dbg_last_rise_time[ch]
-                    ? (int32_t)(ack_dbg_last_rise_time[ch] - ack_dbg_start_time[ch])
-                    : 0;
+                // Successful ACK. Two cases:
+                //   Retrospective: the ISR captured the ACK's rising edge
+                //   BEFORE ack_irq_start() was called (typical for RX,
+                //   where parseRMTData took ~200 ms). detect_delta is
+                //   negative — the pulse ended before we armed.
+                //   Prospective: the ISR fired during the 2.2 s watch
+                //   window and set ack_active. detect_delta is positive.
+                int32_t detect_delta = 0;
+                bool retro = false;
+                if (ack_dbg_last_rise_time[ch] != 0) {
+                    detect_delta = (int32_t)(ack_dbg_last_rise_time[ch] - ack_dbg_start_time[ch]);
+                    retro = (detect_delta < 0);
+                }
                 int32_t first_fall_delta = ack_dbg_first_fall_time[ch]
                     ? (int32_t)(ack_dbg_first_fall_time[ch] - ack_dbg_start_time[ch])
                     : 0;
                 public_debug_message(String("Ch ") + ch + " ACK width=" + String(ack_width[ch]) + "us"
+                    " mode=" + (retro ? "retrospective" : "prospective") +
                     " first_fall_delta=" + String(first_fall_delta) + "us"
                     " detect_delta=" + String(detect_delta) + "us"
                     " fall_cnt=" + String(ack_dbg_falling_count[ch]) +
@@ -220,9 +241,9 @@ void loop() {
         }
     }
 
-    // PULSE-width trace: only pulses > 100 ms so ordinary frame bits
-    // (~600 us) don't spam the log. Anything close to the ACK's ~1.1 s
-    // or shorter near-ACK candidates still shows up.
+    // Log per-loop-tick pulses > 100 ms so ordinary frame bits (~600 us)
+    // don't spam the pane. Anything close to the ACK's ~1.1 s or shorter
+    // near-ACK candidates still show up.
     for (uint8_t ch = 0; ch < NUM_CHANNELS; ++ch) {
         if (ack_width_dbg[ch] > 0) {
             if (device_config.debug_verbose && device_config.timing_diagnostics_en && ack_width_dbg[ch] > 100000) {
