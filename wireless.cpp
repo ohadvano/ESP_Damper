@@ -231,7 +231,7 @@ void start_sta_mode() {
     Serial.print(device_config.wifi_ssid);
     WiFi.mode(WIFI_STA);
     WiFi.setHostname(device_config.device_name);
-    WiFi.setSleep(true);
+    WiFi.setSleep(false);
     WiFi.begin(device_config.wifi_ssid, device_config.wifi_pass);
 
     while (WiFi.status() != WL_CONNECTED) {
