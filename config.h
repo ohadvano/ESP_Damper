@@ -18,6 +18,7 @@ typedef struct {
     bool tx_ack_en;
     char ac_model[16];
     bool enable_discovery;
+    bool timing_diagnostics_en;
 } device_config_t;
 
 extern device_config_t device_config;

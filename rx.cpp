@@ -25,6 +25,22 @@ bool ack_timeout[NUM_CHANNELS] = {false};
 size_t ack_width[NUM_CHANNELS] = {0};
 size_t ack_width_dbg[NUM_CHANNELS] = {0};
 
+// ---- ACK-window diagnostics (see globals.h for meaning) ----
+// Populated by the ISR and RX/TX arming paths, consumed by the loop's
+// timing-log emitter when both debug_verbose and timing_diagnostics_en
+// are enabled in the web UI.
+volatile uint32_t ack_dbg_frame_end_time[NUM_CHANNELS]  = {0};
+volatile uint32_t ack_dbg_start_time[NUM_CHANNELS]      = {0};
+volatile uint32_t ack_dbg_gpio_init_time[NUM_CHANNELS]  = {0};
+volatile uint32_t ack_dbg_first_fall_time[NUM_CHANNELS] = {0};
+volatile uint32_t ack_dbg_last_rise_time[NUM_CHANNELS]  = {0};
+volatile uint32_t ack_dbg_falling_count[NUM_CHANNELS]   = {0};
+volatile uint32_t ack_dbg_rising_count[NUM_CHANNELS]    = {0};
+volatile uint32_t ack_dbg_max_width[NUM_CHANNELS]       = {0};
+volatile bool     ack_dbg_isr_attached[NUM_CHANNELS]    = {false};
+volatile uint32_t ack_dbg_pulse_history[NUM_CHANNELS][ACK_DBG_HISTORY] = {{0}};
+volatile uint8_t  ack_dbg_pulse_history_pos[NUM_CHANNELS] = {0};
+
 
 
 esp_timer_handle_t oneshot_timer[NUM_CHANNELS] = {NULL};
@@ -46,6 +62,22 @@ void ack_irq_init(uint8_t ch) {
 
 void ack_irq_start(uint8_t ch) {
     ack_timeout[ch] = false;
+
+    // Reset per-window diagnostic counters and timing markers so the
+    // NACK diag / ACK-success log can reconstruct exactly what happened
+    // during this ACK window.
+    ack_dbg_start_time[ch]      = micros();
+    ack_dbg_gpio_init_time[ch]  = 0;
+    ack_dbg_first_fall_time[ch] = 0;
+    ack_dbg_last_rise_time[ch]  = 0;
+    ack_dbg_falling_count[ch]   = 0;
+    ack_dbg_rising_count[ch]    = 0;
+    ack_dbg_max_width[ch]       = 0;
+    ack_dbg_pulse_history_pos[ch] = 0;
+    for (uint8_t i = 0; i < ACK_DBG_HISTORY; i++) {
+        ack_dbg_pulse_history[ch][i] = 0;
+    }
+
     ESP_ERROR_CHECK(esp_timer_start_once(oneshot_timer[ch], 2200000));
 }
 
@@ -64,11 +96,14 @@ void ack_gpio_init(uint8_t ch) {
     };
     ESP_ERROR_CHECK(gpio_config(&io_conf));
     ESP_ERROR_CHECK(gpio_isr_handler_add(CHANNEL_GPIOS[ch], ack_gpio_isr, (void *)ch));
+    ack_dbg_gpio_init_time[ch] = micros();
+    ack_dbg_isr_attached[ch] = true;
 }
 
 void ack_gpio_remove(uint8_t ch) {
     ESP_ERROR_CHECK(gpio_isr_handler_remove(CHANNEL_GPIOS[ch]));
     ack_timer[ch] = 0;
+    ack_dbg_isr_attached[ch] = false;
 }
 
 void IRAM_ATTR oneshot_timer_callback(void *arg) {
@@ -84,18 +119,38 @@ void IRAM_ATTR ack_gpio_isr(void *arg) {
     uint32_t now = micros();
 
     if (state) {  // Rising edge → pulse end
+        // Diagnostics: count and remember this rising edge.
+        ack_dbg_rising_count[ch]++;
+        ack_dbg_last_rise_time[ch] = now;
+
         uint32_t width = now - ack_timer[ch];
         ack_width[ch] = width;
-        if (ack_timer[ch] != 0 && width > 500000) { // 500000
-            ack_active[ch] = true;
-            ack_gpio_remove(ch);
-            ack_irq_stop(ch);
+
+        // Only track the width in diagnostics when we have a real
+        // falling→rising pair (ack_timer != 0). Otherwise "width" is a
+        // bogus now - 0 = uptime value and would pollute the stats.
+        if (ack_timer[ch] != 0) {
+            if (width > ack_dbg_max_width[ch]) ack_dbg_max_width[ch] = width;
+
+            uint8_t p = ack_dbg_pulse_history_pos[ch];
+            ack_dbg_pulse_history[ch][p] = width;
+            ack_dbg_pulse_history_pos[ch] = (p + 1) % ACK_DBG_HISTORY;
+
+            if (width > 500000) { // 500000
+                ack_active[ch] = true;
+                ack_gpio_remove(ch);
+                ack_irq_stop(ch);
+            }
         }
 
         ack_width_dbg[ch] = width;
 
-    } 
+    }
     else {  // Falling edge → pulse start
+        // Diagnostics: count and remember this falling edge.
+        ack_dbg_falling_count[ch]++;
+        if (ack_dbg_first_fall_time[ch] == 0) ack_dbg_first_fall_time[ch] = now;
+
         if (ack_timer[ch] == 0) ack_timer[ch] = now;
     }
 }
@@ -113,7 +168,14 @@ bool rmt_rx_done_callback(rmt_channel_handle_t channel, const rmt_rx_done_event_
         memcpy(rx_data_copy[ch][rx_data_chunk[ch]], edata->received_symbols, count * sizeof(rmt_symbol_word_t));
         rx_data_len[ch] = count;
         rx_data_chunk[ch]++;
-        if (rx_data_chunk[ch] == RX_FRAMES) { rx_data_chunk[ch] = 0; data_ready[ch] = true; }
+        if (rx_data_chunk[ch] == RX_FRAMES) {
+            rx_data_chunk[ch] = 0;
+            data_ready[ch] = true;
+            // Diagnostics: latest RMT callback for the 3rd frame — RMT is
+            // now idle for this channel; anything on the bus after this
+            // is the TAC-910's response.
+            ack_dbg_frame_end_time[ch] = micros();
+        }
     }
 
 

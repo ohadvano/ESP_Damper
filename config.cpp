@@ -33,6 +33,12 @@ void config_set_defaults() {
   strcpy(device_config.ac_model, "tac910");
 
   device_config.enable_discovery = true;
+
+  // Timing diagnostics are opt-in — off by default. When enabled together
+  // with debug_verbose, the loop emits per-event timing traces (ACK arm
+  // latency, edge counts, NACK diag dumps) useful for debugging ISR
+  // timing issues.
+  device_config.timing_diagnostics_en = false;
 }
 
 void config_begin() {

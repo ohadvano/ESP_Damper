@@ -279,6 +279,21 @@ static String buildConfigPageHtml() {
     "</div></div>"
   );
 
+  // Timing diagnostics — verbose per-event ACK/RX/TX timing traces.
+  // Only takes effect when debug verbosity is also on.
+  html += F(
+    "<div class='section'>"
+    "<div class='field' style='display:flex;align-items:center;justify-content:space-between;'>"
+    "<div style='font-size:16px;font-weight:400;'>Timing diagnostics</div>"
+    "<label class='switch'>"
+    "<input type='checkbox' name='timing_diag' value='1' "
+  );
+  html += device_config.timing_diagnostics_en ? "checked" : "";
+  html += F(
+    "><span class='slider'></span></label>"
+    "</div></div>"
+  );
+
   if (device_config.debug_verbose) {
     html += F(
       "<div class='section'>"
@@ -550,6 +565,7 @@ void web_begin(AsyncWebServer& server, PubSubClient& mqttClient) {
     device_config.rx_ack_en = request->hasParam("rx_ack_en", true);
     device_config.tx_ack_en = request->hasParam("tx_ack_en", true);
     device_config.enable_discovery = request->hasParam("discovery", true);
+    device_config.timing_diagnostics_en = request->hasParam("timing_diag", true);
 
     if (device_config.wifi_ssid[0] == '\0') device_config.wifi_pass[0] = '\0';
     if (device_config.mqtt_user[0] == '\0') device_config.mqtt_pass[0] = '\0';
